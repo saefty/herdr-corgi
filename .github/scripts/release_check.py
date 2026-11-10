@@ -16,7 +16,9 @@ def notes(tag, root="."):
     if not m:
         sys.exit(f"tag {tag!r} is not vX.Y.Z")
     version = m.group(1)
-    manifests = glob.glob(os.path.join(root, "mods", "*", "corgi.json"))
+    # Bundled copies of other mods (a BUNDLED.md next to them) carry their own versions: not this repo's.
+    manifests = [m for m in glob.glob(os.path.join(root, "mods", "*", "corgi.json"))
+                 if not os.path.exists(os.path.join(os.path.dirname(m), "BUNDLED.md"))]
     if len(manifests) != 1:
         sys.exit(f"expected one mods/*/corgi.json, found {len(manifests)}")
     with open(manifests[0], encoding="utf-8") as f:

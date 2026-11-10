@@ -285,7 +285,12 @@ def now():
 
 def min_age_days(cfg=None):
     cfg = config() if cfg is None else cfg
-    return 0 if cfg.get("early_updates") else int(cfg.get("min_release_age_days", 3))
+    if cfg.get("early_updates"):
+        return 0
+    try:
+        return max(0, int(cfg.get("min_release_age_days", 3)))
+    except (TypeError, ValueError):  # a hand-edited config: fall back to the default
+        return 3
 
 
 def released(d, version):

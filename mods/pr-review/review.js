@@ -10,8 +10,8 @@
 // composer under that line, pending comments show as threads there, and "Finish your review" in the bar opens the
 // submit popover: one GitHub review (gh api) or, for a PR with an agent session, the prompt to that session.
 import { div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, TextView, v_virtual_list, VirtualListScrollHandle, Textarea, TextareaState } from "gpui-base";
-import { exec, run, spaces, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home } from "herdr";
+import { v_flex, h_flex, Scrollbar, TextView, v_virtual_list, VirtualListScrollHandle, Textarea, TextareaState, Input, InputState } from "gpui-base";
+import { exec, hc, run, spaces, agents, focused, pickFolder, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home } from "herdr";
 import { parseReports, findingStatus, fixPrompt, hash, touchReview, expireReviews, resumeFields, itemKeys, expandTabs, tokenAt } from "./pr.js";
 import * as C from "./context.js";
 import { hasTool, copyText, openUrl, loadSetup, readConfig } from "./setup-view.js";
@@ -20,8 +20,10 @@ import { lookup, warm, contents, vscodeArgs, where, setTrusted } from "./defs.js
 import { diffRows, hunksOf, selection, uiLine, lineKey, rangeOf, MODELS, reviewRequest, mapReview, suspectComment, stepKey, fileRows, fileTree, atLine, splitPatch } from "./pr.js";
 import { ghTarget, lowValue, markReviewed, sinceBase, verifyCandidates, applyVerification, blastArch, preMergeChecks, mergeBlockers, triageOf } from "./pr.js";
 import { diffLines, inDiff, ghReview, lineThreads, suggestionBlock, buildReview, layoutPlan, specElements, diagramsState } from "./pr.js";
-import { archView, archModel, archLegend, visualsCard, statCard, segBar, foldCard, chip, legend, specTag, sourceLegend, SEVERITY_COLOR } from "./stack.js";
-import { hasSources } from "./arch.js";
+import { archView, archModel, archLegend, visualsCard, visualCard, statCard, segBar, foldCard, chip, legend, specTag, sourceLegend, SEVERITY_COLOR } from "./stack.js";
+import { hasSources, archLayout } from "./arch.js";
+import * as TH from "./threads.js";
+import { leftWidth, rowClick, CHIP_W, ASK_W, keyRoute, scopeLine, pictureOf, scopeOf, scopeFiles, hunksFor, mapAnswer, threadAdd, threadOf, history, highlightOf, rangeLabel, pinAnchor, pinAdd, pinDrop, pinsOf, pinsOn, codePins, drillPush, drillTo, crumbs, drillKey, cachePut, mapDrill, exploreId, exploreIndex, exploreAi, pathOf, lineOf, repoOfRemote, exploreTrust } from "./explore.js";
 
 const LEVEL = { high: "ansi1", medium: "ansi3", low: "ansi4", skim: "muted" };
 const COVER = { seen: ["done", "ansi2"], partly: ["partly", "ansi3"], absent: ["missing", "ansi1"], extra: ["extra (not asked)", "ansi4"] };
@@ -31,9 +33,10 @@ const GH_GREEN = "#238636"; // GitHub's "Review changes" button
 const STATUS = { added: ["A", "ansi2"], deleted: ["D", "ansi1"], renamed: ["R", "ansi4"], modified: ["M", "ansi3"] };
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // Diff column geometry: clicks inside the virtual list are placed by x (one click handler per list).
-const LEFT = 420, ROW = 22, GUTTER = 4 + 48 + 48 + 22, GAP_SEG = 110, BTN = 110, BTN_GAP = 8, ACT = 44;
+const SPLIT = 6, ROW = 22, GUTTER = 4 + 48 + 48 + 22, GAP_SEG = 110, BTN = 110, BTN_GAP = 8, ACT = 44;
 const FILE_CHEV = 30, FILE_SEEN = 100, FILE_WHOLE = 124;
 const MORE = 20; // lines per ↑/↓ click
+const KEYS_POP = { width: 340, height: 330 }; // the "?" popup: sized to its rows and the last line
 const COMPOSE = 168; // the composer row: header + a fixed-height textarea (the list needs every row's height up front)
 const progressFile = () => `${appHome()}/pr-data/review-progress.json`; // per PR: progress and where you were (bounded)
 const MAX_PROGRESS = 100;
@@ -50,6 +53,10 @@ const valuesOn = () => shared("review.values") !== false; // inline example valu
 const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
 const CAP = { haiku: 1, sonnet: 3, opus: 10 }; // review.py BUDGET
 const findDir = () => `${appHome()}/pr-data/findings`;
+const threadsFile = () => `${appHome()}/pr-data/threads.json`; // sent and posted comments as threads (threads.js bounds it)
+const repliesDir = () => `${appHome()}/pr-data/replies`; // the agent's answers, <pr hash>.jsonl
+const exploreDir = () => `${appHome()}/pr-data/explore`; // explorations: <id>.json and index.json (the newest 20)
+const deepFile = () => `${appHome()}/pr-data/deep.json`; // Ask threads per PR and drill-downs per node (explore.js bounds both)
 const ctxDoc = () => shared(C.CONTEXTS_KEY);
 const prCtx = (pr) => C.prContext(ctxDoc(), pr, home());
 const ALL_REVIEWERS = { claude: ["Claude code review", "ansi5"], security: ["Security review", "ansi1"], codex: ["Codex review", "ansi6"] };
@@ -58,6 +65,10 @@ const REVIEWERS = ALL_REVIEWERS;
 const reviewersNow = () => Object.entries(ALL_REVIEWERS).filter(([k]) => k !== "codex" || hasTool("codex"));
 const FSTATUS = { open: ["Open", "muted"], progress: ["In progress", "ansi3"], fixed: ["Fixed ✓", "ansi2"], dismissed: ["Dismissed", "dim"], recheck: ["Recheck (code changed)", "ansi3"] };
 const SEV = { high: "ansi1", medium: "ansi3", low: "ansi4" };
+// Where a card comes from: its stripe, and the Show switch's colours.
+const SOURCE = { mine: "accent", ai: "ansi3", agents: "ansi6", github: "ansi4", notes: "ansi5" };
+const CARD_W = 720, CARD_MIN = 420, CARD_HEAD = 32, CARD_REPLY = 34, CARD_GAP = 6;
+const THREAD_COLOR = { fixed: "ansi2", answered: "accent", wontfix: "muted", question: "ansi3", sent: "ansi4", posted: "ansi4" };
 const PROBE = "0".repeat(40);
 const CTX_MS = 10 * 60000; // related PRs, CI checks, mergeability (related.py): asked again after this while the review is open
 const OPEN_ST = ["open", "progress", "recheck"];
@@ -86,11 +97,20 @@ export function renderReviews() {
 export function renderKeys() {
   const t = theme();
   return v_flex().id("rv-keys-pop").size_full().p(12).gap(7).bg(t.popover).text_color(t.foreground).text_size(13)
-    .child(div().font_semibold().pb(2).child("Keyboard shortcuts"))
+    .child(div().font_semibold().child("Keyboard shortcuts"))
+    .child(div().pb(2).text_size(12.5).whitespace_normal().child("Click a line number or press c to comment; shift-click for a range."))
     .children([["j k", "next / previous file (Layers: step)"], ["n p", "next / previous hunk"], ["c", "comment on the selected line"], ["a x", "accept / dismiss AI suggestion"],
       ["⌘ click", "go to definition"], ["⌘ ↩", "add the comment (in the composer)"], ["Esc", "close composer or popover, else back"]].map(([k, what]) =>
-      h_flex().gap(10).items_center().child(h_flex().w(74).flex_none().gap(3).children(k.split(" ").map((x) => kbd(t, x)))).child(div().text_color(t.muted).child(what))))
-    .child(div().pt(2).text_size(12).text_color(t.muted).child("Click a line number to comment, shift-click for a range."));
+      h_flex().gap(10).items_center().child(h_flex().w(74).flex_none().gap(3).children(k.split(" ").map((x) => kbd(t, x)))).child(div().text_color(t.muted).child(what))));
+}
+
+// A small menu (props {part: "cmenu", key, items: [[label, danger, command?]]}): an item runs pr-review.<command>, or
+// for a comment card's "⋯" pr-review.cmenu:<index>|<card key>, in the review copy.
+export function renderCardMenu() {
+  const t = theme(), { key, items = [], overlay } = props();
+  return v_flex().id("rv-cmenu").size_full().p(4).gap(1).bg(t.popover).text_color(t.foreground).text_size(13)
+    .children(items.map(([label, danger], k) => div().id(`rv-cm-${k}`).px(10).py(5).rounded(5).cursor_pointer().hover((s) => s.bg(t.hover))
+      .text_color(danger ? t.ansi1 : t.foreground).on_click(() => { run(`pr-review.${items[k][2] ?? `cmenu:${k}|${key}`}`); closeOverlay(overlay); }).child(label)));
 }
 
 // The title bar of the floating agent terminal (props {part: "agentbar", title}): drag it, close it.
@@ -126,7 +146,24 @@ export async function startReview(target) {
   const back = shared("layout");
   if (back && back !== plan.name) setShared("review.back", back);
   setShared("review.layout", plan.name);
+  setShared("review.explore", null);
   setShared("review.target", target);
+  run("layout.switch", { name: plan.name });
+}
+
+// Opens Explore in the review layout (pr-review.explore, the panel's "Explore a topic…", the review's ⋯ menu): a topic
+// walked through in existing code, no PR. root: the repo to explore (default: the active space's repo, chosen there).
+export async function startExplore(root = null) {
+  const dir = `${appHome()}/layouts`, read = (name) => readTextFile(`${dir}/${name}.json`).catch(() => null);
+  const plan = layoutPlan(await read("review"), await read("pr-review"));
+  if (plan.write) {
+    await exec("mkdir", ["-p", dir]).catch(() => null);
+    await writeTextFile(`${dir}/${plan.name}.json`, await readTextFile(`${appHome()}/mods/pr-review/review-layout.json`), null).catch(() => null);
+  }
+  const back = shared("layout");
+  if (back && back !== plan.name) setShared("review.back", back);
+  setShared("review.layout", plan.name);
+  setShared("review.explore", { start: true, root, space: focused()?.space ?? null, at: Date.now() });
   run("layout.switch", { name: plan.name });
 }
 const leave = () => run("layout.switch", { name: shared("review.back") || "main" });
@@ -194,12 +231,30 @@ export const ReviewMode = {
     this.composing = false; this.finishOpen = false; this.event = "comment"; this.route = null; this.posted = null; this.gh = [];
     this.draft = TextareaState.new({ placeholder: "Leave a comment (⌘↩ adds it, Esc cancels)" });
     this.summary = TextareaState.new({ placeholder: "Leave a comment" });
-    for (const [st, k] of [[this.draft, "draft"], [this.summary, "summary"]]) {
+    // Threads: sent/posted comments with their replies; the GitHub preview's ticks and inline edit; the agent preview.
+    this.threadDoc = {}; this.replies = {}; this.openThreads = new Set(); this.off = new Set(); this.summaryOn = true; this.editItem = null; this.replyTo = null; this.sendP = null;
+    this.itemEdit = TextareaState.new({ placeholder: "Comment text" });
+    this.sendText = TextareaState.new({ placeholder: "What the agent gets" });
+    this.replyIn = InputState.new({ placeholder: "Reply in this thread… (Enter: preview)" });
+    this.exTopic = InputState.new({ placeholder: "How does the reminder job get scheduled and sent? (Enter)" });
+    this.exTopic.on("submit", (_e, cx) => this.runExplore(cx));
+    this.replyIn.on("submit", (_e, cx) => this.followup(cx));
+    cx.spawn(async (cx) => {
+      await exec("mkdir", ["-p", repliesDir()]).catch(() => null);
+      for (;;) { await watchFolder(repliesDir()).catch(() => null); await this.loadThreads(cx); }
+    });
+    cx.timer.every(180000, (cx) => { if (this.prSel) { this.loadGhComments(cx); this.loadThreads(cx); } }); // GitHub replies: every 3 min while open
+    for (const [st, k] of [[this.draft, "draft"], [this.summary, "summary"], [this.itemEdit, "item"], [this.sendText, "send"]]) {
       st.on("focus", (_e, cx) => { this.typing = k; cx.notify(); });
       st.on("blur", (_e, cx) => { if (this.typing === k) this.typing = false; cx.notify(); });
     }
     this.prSel = shared("review.target") ?? null;
     cx.spawn(async (cx) => { this.cfg = await readConfig(); await loadSetup(this, cx); });
+    // Ask about this: one input (the Architecture page's or the shown layer's), threads and drill-downs from deep.json.
+    this.askIn = InputState.new({ placeholder: "Ask about this… (Enter)" });
+    this.askIn.on("submit", (_e, cx) => this.askNow(cx));
+    this.deep = { threads: {}, drills: {}, pins: {}, drawer: {} }; this.askBusy = null; this.askErr = null; this.askAbout = null;
+    cx.spawn(async (cx) => { const d = JSON.parse(await readTextFile(deepFile()).catch(() => null) ?? "null"); if (d) this.deep = { threads: d.threads ?? {}, drills: d.drills ?? {}, pins: d.pins ?? {}, drawer: d.drawer ?? {} }; cx.notify(); });
     this.refresh(cx);
     this.fh.focus();
     cx.timer.after(400, () => this.fh.focus());
@@ -209,7 +264,7 @@ export const ReviewMode = {
 
   command(c, cx) {
     const [name, ...rest] = c.split(":"), arg = rest.join(":");
-    if (name === "steps" || name === "files" || name === "findings") this.tab = name;
+    if (name === "steps" || name === "files" || name === "findings" || name === "comments") this.tab = name;
     else if (name === "def") this.defineAt(arg, cx);
     else if (name === "page") { this.tab = "steps"; this.page = PAGES.some(([k]) => k === arg) ? arg : "overview"; }
     else if (name === "verify") this.runVerify(cx);
@@ -224,13 +279,34 @@ export const ReviewMode = {
     else if (name === "done") { this.registerReview(cx, { status: "done", doneAt: Date.now() }); this.note = "Marked done: it leaves the open reviews"; }
     else if (name === "findings") this.tab = "findings";
     else if (name === "back") leave();
-    else if (name === "finish") this.finishOpen = !this.finishOpen;
+    else if (name === "finish") { this.finishOpen = !this.finishOpen; if (this.finishOpen) this.loadGhLogin(cx); }
     else if (name === "discuss") { const f = this.find.list.find((x) => x.id === arg); if (f) this.discuss(f, cx); } // discuss:<finding id> (scripts, keys)
-    else if (name === "keys") openOverlay({ mod: "pr-review", props: { part: "keys" }, kind: "popup", width: 330, height: 250 });
+    else if (name === "keys") openOverlay({ mod: "pr-review", props: { part: "keys" }, kind: "popup", ...KEYS_POP });
     else if (name === "comment") { // comment:<path>:<line>[-<end>]: the composer under that new-side line (scripts, tests)
       const m = /^(.*):(\d+)(?:-(\d+))?$/.exec(arg);
       if (m) { this.tab = "files"; this.collapsed.delete(m[1]); this.fsel = { path: m[1], a: `+${m[2]}`, b: `+${m[3] ?? m[2]}` }; this.openComposer(cx, null, true); }
     }
+    // Scripts and tests: the composer's text, then its "Post now / Send to agent…" button; the preview's "Send to agent".
+    else if (name === "draft") { this.draft.set_value(arg); }
+    else if (name === "single") this.singleComment(cx);
+    else if (name === "send") this.sendConfirmed(cx);
+    else if (name === "route") this.route = arg; // github | agent: where Submit and single comments go
+    else if (name === "fix") this.fixComments(arg ? arg.split(",") : this.selected(), cx); // fix:<comment id>[,<id>…], else the selected ones (the preview opens)
+    else if (name === "fix-target") this.fixTarget(arg); // sub | main, in the open preview
+    else if (name === "explore") startExplore(arg || null);
+    else if (name === "explore-open") this.openExploration(arg, cx);
+    else if (name === "trust-repo") { // the explored repo, or the folder when it has no github.com remote
+      const key = this.ex?.repo ? "pr-review.trustedRepos" : "pr-review.trustedRoots", v = this.ex?.repo ?? this.ex?.root;
+      if (v) setShared(key, [v, ...(shared(key) ?? []).filter((x) => x !== v)].slice(0, 200));
+      this.applyExploreTrust();
+    }
+    else if (name === "copy-link") copyText(this.prSel?.url ?? "");
+    else if (name === "open-gh") { if (this.prSel?.url) openUrl(this.prSel.url); }
+    else if (name === "model") { if (MODELS[arg]) setShared("review.model", arg); }
+    else if (name === "trust") this.trust("pr", cx);
+    else if (name === "cmenu") { const [k, ...key] = arg.split("|"), card = this.cardByKey(key.join("|")); card?.menu[Number(k)]?.[2]?.(cx); }
+    else if (name === "ask") this.setDrawer(arg === "close" ? null : arg === "fold" ? "collapsed" : "open", cx); // the Ask drawer: open | fold | close
+    else if (name === "apply") { const j = this.fixes().find((f) => f.id === arg) ?? this.fixes().filter((f) => f.state === "running").at(-1); if (j) this.applyFix(j, cx); }
     else if (name === "open") {
       cx.spawn(async () => {
         const prs = JSON.parse(await readTextFile(`${appHome()}/pr-data/prs.json`).catch(() => null) ?? "{}").prs ?? [];
@@ -257,6 +333,7 @@ export const ReviewMode = {
     for (const h of this.hunks) this.fileHunks.set(h.path, [...(this.fileHunks.get(h.path) ?? []), h]);
     this.diffLines = diffLines(this.hunks);
     this.loadGhComments(cx);
+    await this.loadThreads(cx);
     const p = JSON.parse(await readTextFile(progressFile()).catch(() => null) ?? "{}")[url] ?? {};
     this.prog = { visited: new Set(p.visited ?? []), checked: p.checked ?? {}, handled: p.handled ?? {}, seen: new Set(p.seen ?? []) };
     this.collapsed = new Set(this.prog.seen);
@@ -422,8 +499,9 @@ export const ReviewMode = {
 
   progressNow() {
     const steps = this.ai?.steps ?? [];
+    const th = TH.threadCounts(this.threads(), this.replies, this.gh);
     return { steps: steps.length, stepsChecked: steps.filter((s) => this.done(s)).length, files: this.patch?.length ?? 0, filesViewed: this.prog.seen.size,
-      comments: this.comments.length, findingsOpen: this.find.list.filter((f) => ["open", "progress", "recheck"].includes(this.fstatus(f))).length };
+      comments: this.comments.length, threads: th.threads, replies: th.replies, fixedThreads: th.fixed, findingsOpen: this.find.list.filter((f) => ["open", "progress", "recheck"].includes(this.fstatus(f))).length };
   },
 
   // This PR in pr-data/open-reviews.json (and shared "review.open"), 1.5 s after the last change: opened, worked on,
@@ -471,16 +549,24 @@ export const ReviewMode = {
       if (this.aiBusy) return;
       if (!job.req.hunks.length) { this.aiError = "No diff"; return cx.notify(); }
       if (!this.worktree && !this.prSel.space) { this.pendingRun = true; this.note = "Analysis starts once the PR head is checked out…"; return cx.notify(); }
-      let req = job.req;
+      // Every hunk goes along: review.py inlines what fits and lets the model read the rest (no "too large" cut).
+      const all = (hs) => hs.map(({ alias, id, path, lines }) => ({ alias, id, path, lines }));
+      let req = { ...job.req, hunks: all(job.hunks), cut: [] };
       if (incremental) {
         if (!this.since?.files.length || !this.aiFile) return;
-        const inc = reviewRequest({ url, files: this.since.files, model: m, context: this.ctxReq(), dir: cacheDir() }).req, n = (a) => a.replace(/^h/, "n");
-        req = { ...job.req, hunks: inc.hunks.map((h) => ({ ...h, alias: n(h.alias) })), cut: inc.cut.map(n), previous: this.aiFile,
+        const inc = reviewRequest({ url, files: this.since.files, model: m, context: this.ctxReq(), dir: cacheDir() }), n = (a) => a.replace(/^h/, "n");
+        req = { ...job.req, hunks: all(inc.hunks).map((h) => ({ ...h, alias: n(h.alias) })), cut: [], previous: this.aiFile,
           since: { base: this.since.base.sha, head: this.since.head }, full: job.hunks.map((h) => ({ alias: h.alias, id: h.id, path: h.path, head: h.lines[0] })) };
       }
       this.aiError = null; this.aiBusy = { model: m, started: Date.now(), status: job.status, incremental };
-      exec("sh", ["-c", 'nohup python3 "$0" "$1" >/dev/null 2>&1 &', `${appHome()}/mods/pr-review/review.py`, JSON.stringify(req)])
+      // The request as a file: a big PR's hunks outgrow a command line.
+      const reqFile = `${job.out}.req.json`;
+      cx.spawn(async (cx) => {
+        const before = await readTextFile(reqFile).catch(() => null);
+        await writeTextFile(reqFile, JSON.stringify(req), before).catch((e) => { this.aiError = String(e); });
+        exec("sh", ["-c", 'nohup python3 "$0" "$1" >/dev/null 2>&1 &', `${appHome()}/mods/pr-review/review.py`, `@${reqFile}`])
         .catch((e) => { this.aiError = String(e); this.aiBusy = false; cx.notify(); });
+      });
       this.publish(); this.pollAi(cx, job, url, m);
       return cx.notify();
     }
@@ -548,7 +634,7 @@ export const ReviewMode = {
     cx.timer.after(5000, (cx) => cx.spawn(async (cx) => {
       if (this.prSel?.url !== url || !this.aiBusy) return;
       const st = JSON.parse(await readTextFile(job.status).catch(() => null) ?? "null");
-      if (st?.busy || !st) { if (st?.pid) this.aiBusy.pid = st.pid; cx.notify(); return this.pollAi(cx, job, url, m); }
+      if (st?.busy || !st) { if (st?.pid) this.aiBusy.pid = st.pid; if (st?.passes) Object.assign(this.aiBusy, { pass: st.pass, passes: st.passes }); cx.notify(); return this.pollAi(cx, job, url, m); }
       this.aiBusy = false;
       if (st.error) this.aiError = st.error;
       else {
@@ -581,13 +667,13 @@ export const ReviewMode = {
       ...extra(`In no step (${left.filter((h) => !cut.has(h.alias)).length} hunks)`, exact ? "The model put these hunks in no step." : "New since the analysis.", left.filter((h) => !cut.has(h.alias))));
     for (const s of r.steps) s.stale = s.hunks.length > 0 && !s.hunks.some((id) => this.byId.has(id));
     return { ...r, exact, diagrams: saved.diagrams ?? null, cost: saved.cost, ms: saved.ms, budget: saved.budget, model: saved.model, model_id: saved.model_id, generated: saved.generated, cut: saved.cut ?? [], task: saved.task ?? {},
-      incremental: saved.incremental ?? null };
+      incremental: saved.incremental ?? null, scope: saved.scope ?? null };
   },
 
   // What the bar shows: the analysis on screen, or the one running.
   publish() {
     const a = this.ai;
-    setShared("review.meta", { url: this.prSel?.url ?? null, pending: this.comments?.length ?? 0, model: this.aiModel, busy: this.aiBusy?.model ?? null, error: this.aiError,
+    setShared("review.meta", { url: this.prSel?.url ?? null, pending: this.comments?.length ?? 0, selected: this.prSel ? this.selected().length : 0, model: this.aiModel, busy: this.aiBusy?.model ?? null, error: this.aiError,
       shown: a ? { model: a.model, model_id: a.model_id, cost: a.cost, exact: a.exact, mergeRisk: a.mergeRisk, effort: a.effort } : null,
       checks: this.prSel ? this.checksNow().reduce((n, c) => ({ ok: n.ok + (c.ok === true), fail: n.fail + (c.ok === false) }), { ok: 0, fail: 0 }) : null });
   },
@@ -709,7 +795,11 @@ export const ReviewMode = {
   // the chatbar mod present (shared "chatbar.api"), its bubble takes the draft instead (PROVIDERS.md, chatbar.request).
   // ponytail: goes through the clipboard (hc send always presses Enter), so the clipboard holds the prompt after.
   discuss(f, cx) {
-    const text = this.findingText(f), origin = this.prSel;
+    const text = this.findingText(f);
+    this.previewSend(cx, { what: "Discuss", own: `${f.title}: ${f.detail}`, prompt: text, go: (edited, cx) => this.discussNow(f, edited, cx) });
+  },
+  discussNow(f, text, cx) {
+    const origin = this.prSel;
     // A PR picked from a list or handed over by Go to has no space: the agent is the one in a space at the PR's checkout.
     const space = origin?.space ?? spaces().find((s) => origin?.cwd && s.folder === origin.cwd)?.id ?? null;
     const agent = origin?.session ? this.sessionAgent(origin) : this.target(space);
@@ -737,13 +827,14 @@ export const ReviewMode = {
   fix(list, cx) {
     if (!list.length) return;
     const report = `${findDir()}/${hash(this.prSel.url)}.jsonl`;
-    this.deliver(fixPrompt(list, this.pr, report, this.lang()), cx, list.length === 1 ? "Fix" : `Fix (${list.length})`, (cx) => { for (const f of list) this.setFinding(f, "progress", cx, { fixHead: this.headNow() }); });
-
+    this.previewFix(cx, { what: list.length === 1 ? "Fix" : `Fix (${list.length})`, own: list.map((f) => `${f.title} (${f.file}:${f.line})`).join("\n"), items: list.map((f) => ({ kind: "finding", id: f.id })),
+      prompt: (branch, path) => [fixPrompt(list, this.pr, report, this.lang()), branch ? TH.worktreeNote(branch, path) : null].filter(Boolean).join("\n\n"),
+      sent: (cx) => { for (const f of list) this.setFinding(f, "progress", cx, { fixHead: this.headNow() }); } });
   },
 
   // ---- definitions (defs.js: language servers through lsp_bridge.py, on the PR head checkout)
 
-  lspRoot() { return this.worktree?.path ?? (this.prSel?.space ? this.root : null); },
+  lspRoot() { return this.exMode ? this.ex?.root ?? null : this.worktree?.path ?? (this.prSel?.space ? this.root : null); },
 
   define(it, r, cx) {
     const spans = this.spanMap?.get(it.src)?.spans?.[it.ri] ?? [];
@@ -771,6 +862,19 @@ export const ReviewMode = {
       setShared("pr.defs.last", { ...q, name: tok.name, status: d.res.status, message: d.res.message, def: d.res.definitions?.[0] ? where(d.res.definitions[0]) : null, at: new Date().toISOString() });
       if (this.defAt === d) cx.notify();
     });
+    cx.notify();
+  },
+
+  // ⌘-click a name in the file view: its definition (the language servers of the repo; Restricted Mode as for PRs).
+  defViewClick(i, cx) {
+    const f = this.defFile, line = f?.lines[i];
+    if (!f || line === undefined || !this.press.cmd) return;
+    const row = { text: line, number: f.from + i + 1, n: f.from + i + 1, kind: " " }, tok = tokenAt(row, f.spans[i] ?? [], this.press.x, 56, this.charW ?? 7.8);
+    if (!tok) { this.note = "⌘-click a name for its definition"; return cx.notify(); }
+    const q = { root: this.lspRoot(), rev: this.exMode ? "" : this.worktree?.head ?? this.head ?? "", path: f.path, line: tok.line, character: tok.character, side: "+" };
+    const d = { key: `view:${f.path}:${tok.line}`, name: tok.name, res: null, inView: true };
+    this.defAt = d;
+    cx.spawn(async (cx) => { d.res = await lookup(q).catch((e) => ({ status: "error", message: String(e), definitions: [] })); if (this.defAt === d) cx.notify(); });
     cx.notify();
   },
 
@@ -821,15 +925,21 @@ export const ReviewMode = {
     const f = this.defFile, c = colors(t), mono = settings().font_family ?? "JetBrains Mono";
     return v_flex().flex_1().min_h(0)
       .child(h_flex().flex_none().h(40).px(12).gap(10).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(13)
-        .child(pill("rv-def-back", t, "← Back to the diff", (_e, cx) => { this.defFile = null; cx.notify(); }))
+        .child(pill("rv-def-back", t, this.exMode ? "← Back" : "← Back to the diff", (_e, cx) => { this.defFile = null; this.defAt = null; cx.notify(); }))
         .child(div().flex_1().min_w(0).truncate().font_family(mono).font_semibold().child(`${f.path}:${f.line}`)))
+      .when(Boolean(this.defAt?.inView), (e) => { const d = this.defAt, def = d.res?.definitions?.[0];
+        return e.child(h_flex().flex_none().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border).bg(t.surface).text_size(12.5)
+          .child(div().flex_1().min_w(0).truncate().child(!d.res ? `Looking up ${d.name}…` : def ? `${d.name} → ${where(def)}` : `${d.name}: ${this.defMessage(d.res)}`))
+          .when(Boolean(def), (x) => x.child(pill("rv-defv-go", t, "Go to definition", (_e, cx) => this.goDef(def, cx), false, t.foreground)))
+          .child(pill("rv-defv-x", t, "✕", (_e, cx) => { this.defAt = null; cx.notify(); }))); })
       .child(div().flex_1().min_h(0).relative()
+        .on_mouse_down("left", (e) => { this.press = { x: e.local_position?.x ?? 0, w: e.bounds?.width ?? 0, shift: e.modifiers.shift, cmd: e.modifiers.platform }; })
         .child(v_virtual_list("rv-def-list", f.lines.length, ROW, (i) => String(i), (range) => f.lines.slice(range.start, range.end).map((l, k) => {
           const i = range.start + k;
           return h_flex().h(ROW).w_full().font_family(mono).text_size(13).when(f.from + i + 1 === f.line, (e) => e.bg(t.accent + "26"))
             .child(div().w(56).flex_none().pr(10).text_right().text_color(t.muted).child(String(f.from + i + 1)))
             .child(h_flex().flex_1().min_w(0).overflow_hidden().children(renderLine(div, l, f.spans[i] ?? [], c)));
-        })).track_scroll(this.lists.def).size_full())
+        })).track_scroll(this.lists.def).on_item_click((key, cx) => this.defViewClick(Number(key), cx)).size_full())
         .child(Scrollbar.vertical("rv-def-list").absolute().inset_0()));
   },
 
@@ -849,13 +959,14 @@ export const ReviewMode = {
 
   // A flow's "path:line" to the hunk that holds it (in the AI list, else the Files view).
   jumpTo(at, cx) {
+    if (this.exMode) return this.openExploreFile(pathOf(at), lineOf(at) ?? 1, cx); // no diff: the file itself
     const [, path, line] = /^(.*?):(\d+)/.exec(at ?? "") ?? [];
     const h = (this.hunks ?? []).find((x) => path && (x.path === path || x.path.endsWith(`/${path}`)) && x.rows.some((r) => r.n === Number(line)))
       ?? (this.hunks ?? []).find((x) => path && (x.path === path || x.path.endsWith(`/${path}`)));
     if (!h) { this.note = `Could not find ${at} in the diff`; return cx.notify(); }
     this.visit(h.id, cx); this.page = null; // from a Layers page: show the diff
     const view = this.tab === "steps" && this.itemsOf("steps").at[h.id] !== undefined ? "steps" : "files";
-    if (view === "files") { if (this.tab !== "findings") this.tab = "files"; this.collapsed.delete(h.path); this.sinceOn = false; } // the whole PR has every hunk
+    if (view === "files") { if (this.tab !== "findings" && this.tab !== "comments") this.tab = "files"; this.collapsed.delete(h.path); this.sinceOn = false; } // the whole PR has every hunk
     const k = `+${line}`, { items } = this.itemsOf(view), row = items.findIndex((x) => x.t === "row" && x.path === h.path && lineKey(x.src[x.ri]) === k);
     if (line && row >= 0) { this.fsel = { path: h.path, a: k, b: k }; this.lists[view].scroll_to_item(Math.max(0, row - 3), "top"); }
     else this.scrollTo(view, h.id);
@@ -892,7 +1003,9 @@ export const ReviewMode = {
   pushRows(items, at, rows, path, hunkOf) {
     const sugs = this.openSugs(path), cms = this.comments.filter((c) => c.file === path), used = new Set();
     const finds = this.find.list.filter((f) => f.file === path && ["open", "progress", "recheck"].includes(this.fstatus(f)));
-    const gh = this.gh.filter((g) => g.path === path), f = this.fsel, range = this.composing && f?.path === path && rangeOf(rows, f.a, f.b);
+    const own = this.ghOwn(), gh = this.gh.filter((g) => g.path === path && !own(g)), f = this.fsel, range = this.composing && f?.path === path && rangeOf(rows, f.a, f.b);
+    const ths = this.threads().filter((x) => x.file === path), notes = codePins(this.pins(), path);
+    const show = this.show();
     const thread = { gh, editId: this.composing ? this.editing?.id ?? null : null, composeKey: range && at.compose === undefined ? lineKey(rows[range[1]]) : null };
     rows.forEach((r, ri) => {
       if (r.kind === "gap") { items.push({ t: "gap", path, r }); return; }
@@ -901,14 +1014,23 @@ export const ReviewMode = {
       items.push({ t: "row", path, src: rows, ri, hunk });
       if (r.number === undefined) return;
       if (this.defAt && this.defAt.key === `${path}:${lineKey(r)}`) items.push({ t: "def", d: this.defAt });
-      for (const s of sugs) if (atLine(r, s.line, s.old)) items.push({ t: "sug", s }, { t: "sugact", s });
+      // The Show switch: a kind switched off folds away here, never silently ("n hidden").
+      const hidden = {}, hide = (k) => { hidden[k] = (hidden[k] ?? 0) + 1; };
+      for (const s of sugs) if (atLine(r, s.line, s.old)) { if (show.ai) items.push({ t: "sug", s }, { t: "sugact", s }); else hide("AI"); }
       for (const it of lineThreads(r, cms, thread)) {
         if (it.c) used.add(it.c);
         if (it.t === "compose") { if (at.compose !== undefined) continue; at.compose = items.length; } // one composer, even when a hunk shows twice
         if (it.t === "composeact" && at.compose !== items.length - 1) continue;
+        if (it.t === "comment") { const k = it.c.from === "ki" ? "ai" : "mine"; if (show[k]) items.push(...this.cardItems("c", it.c)); else hide(k === "ai" ? "AI" : "Mine"); continue; }
+        if (it.t === "cact") continue;
+        if (it.t === "gh" && !show.github) { hide("GitHub"); continue; }
         items.push(it);
       }
-      if (r.kind !== "-") for (const f of finds) if (f.line === r.number) items.push({ t: "find", f }, { t: "fact", f });
+      for (const th of ths) if (atLine(r, th.end, th.old)) { if (show.mine) items.push(...this.cardItems("th", th)); else hide("Mine"); }
+      for (const pin of notes) if (atLine(r, pin.anchor.end, pin.anchor.old)) { if (show.notes) items.push(...this.cardItems("pin", pin)); else hide("Notes"); }
+      if (r.kind !== "-") for (const f of finds) if (f.line === r.number) { if (show.ai) items.push({ t: "find", f }, { t: "fact", f }); else hide("AI"); }
+      const n = Object.values(hidden).reduce((a, b) => a + b, 0);
+      if (n) items.push({ t: "hidden", text: `${n} hidden · ${Object.keys(hidden).join(", ")}`, key: `${path}:${lineKey(r)}` });
     });
     return cms.filter((c) => !used.has(c));
   },
@@ -950,7 +1072,7 @@ export const ReviewMode = {
       const loose = this.pushRows(items, at, rows, f.path, (r) => (r.h === undefined ? null : hs[r.h].id));
       for (const c of loose) {
         if (this.composing && this.editing?.id === c.id && at.compose === undefined) { at.compose = items.length; items.push({ t: "compose", c, loose: true }, { t: "composeact", c }); }
-        else items.push({ t: "comment", c, loose: true }, { t: "cact", c });
+        else items.push(...this.cardItems("c", c, true));
       }
     }
     return { items, at };
@@ -972,15 +1094,16 @@ export const ReviewMode = {
       if (this.press.cmd) return this.define(it, r, cx); // ⌘-click a name: its definition
       // Selections are (file, line keys), not row indexes: rows are rebuilt on every render.
       // A line number (GitHub's gutter "+") opens the composer there; shift-click makes it a range.
-      const k = lineKey(r), f = this.fsel, gutter = x < GUTTER - 22;
-      if (this.composing && !gutter && !shift) return this.draft.focus(); // the open composer keeps its line
-      if (shift && f && f.path === it.path && rangeOf(this.rowsFor(it.path), f.a, k)) this.fsel = { ...f, b: k };
-      else if (gutter) this.fsel = { path: it.path, a: k, b: k };
-      else this.fsel = f?.path === it.path && f.a === k && f.b === k ? null : { path: it.path, a: k, b: k };
-      this.sug = null;
-      if (gutter || (shift && this.composing && !this.editing)) this.openComposer(cx);
+      const k = lineKey(r), f = this.fsel;
+      const d = rowClick({ x, w: this.press.w, shift, gutterW: GUTTER, composing: this.composing, editing: Boolean(this.editing), sel: f, path: it.path, k,
+        rangeOk: Boolean(f && f.path === it.path && rangeOf(this.rowsFor(it.path), f.a, k)) });
+      if (d.focus) return this.draft.focus(); // the open composer keeps its line
+      if (d.ask) { this.setDrawer("open", cx, null); return cx.notify(); }
+      this.fsel = d.sel; this.sug = null;
+      if (d.open) this.openComposer(cx);
     } else if (it.t === "sug") { this.sug = this.sug === it.s.key ? null : it.s.key; this.visit(it.s.hunk, cx); }
-    else if (it.t === "comment") this.openComposer(cx, it.c);
+    else if (it.t === "ch" || it.t === "cb" || it.t === "cr") this.cardClick(it, x, cx);
+
     else if (it.t === "composeact") { const b = this.composeButtons().find((b) => x >= b.x && x < b.x + b.w); if (b) this[b.act](cx); }
     else if (it.t === "def") {
       const b = x - GUTTER - 12, which = b >= 0 && b < BTN + 40 ? 0 : b >= BTN + 40 + BTN_GAP && b < 2 * (BTN + 40) + BTN_GAP ? 1 : b >= 2 * (BTN + 40 + BTN_GAP) ? 2 : -1;
@@ -1001,6 +1124,7 @@ export const ReviewMode = {
       else if (it.t === "sugact" && which === 1) this.dropSug(it.s, cx);
       else if (it.t === "cact" && which === 0) this.openComposer(cx, it.c);
       else if (it.t === "cact" && which === 1) this.dropComment(it.c, cx);
+      else if (it.t === "cact" && which === 2) this.fixComments([TH.commentId(it.c)], cx);
     } else if (it.t === "gap") this.expand(it.path, it.r.gap, x < GUTTER + GAP_SEG ? "down" : x < GUTTER + 2 * GAP_SEG ? "up" : "all", cx);
     else if (it.t === "file") {
       const p = it.f.path;
@@ -1106,6 +1230,309 @@ export const ReviewMode = {
     if (i >= 0) this.fsel = { path: h.path, a: lineKey(h.rows[i]), b: lineKey(h.rows[i]) };
   },
 
+  // ---- threads: comments that went out stay under their lines with the agent's or GitHub's replies
+
+  threadKey() { return this.prSel?.url ?? null; },
+  repliesFile() { return `${repliesDir()}/${hash(this.threadKey() ?? "")}.jsonl`; },
+  threads() { return TH.threadsOf(this.threadDoc, this.threadKey()); },
+  async loadThreads(cx) {
+    const key = this.threadKey();
+    if (!key) return;
+    const [doc, rep] = await Promise.all([readTextFile(threadsFile()).catch(() => null), readTextFile(this.repliesFile()).catch(() => null)]);
+    if (this.threadKey() !== key) return;
+    this.threadDoc = doc ? JSON.parse(doc) : {}; this.replies = TH.parseReplies(rep);
+    cx.notify();
+  },
+  // threads.json changed by fn, here and in the file (compare-and-swap, like the findings' status).
+  updateThreads(cx, fn) {
+    this.threadDoc = fn(this.threadDoc);
+    cx.spawn(async (cx) => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const before = await readTextFile(threadsFile()).catch(() => null);
+        try { await writeTextFile(threadsFile(), JSON.stringify(fn(before ? JSON.parse(before) : {})), before); this.registerReview(cx); this.publish(); return; } catch { /* written meanwhile: again */ }
+      }
+      this.note = "Could not save the sent comments"; cx.notify();
+    });
+  },
+  // GitHub comments this review shows itself (a posted thread and the replies to it) stay out of the plain list.
+  ghOwn() {
+    const ids = new Set(this.threads().map((t) => t.ghId).filter(Boolean));
+    return (g) => ids.has(g.id) || ids.has(g.in_reply_to_id);
+  },
+  // A fixed thread folds, unless its fix still waits for Apply to PR.
+  threadOfView(th) { return TH.threadView(th, this.replies[th.id] ?? [], TH.ghRepliesTo(this.gh, th.ghId), this.openThreads.has(th.id) || Boolean(this.fixOf(th.id))); },
+
+  // The agent a send goes to (as deliver picks it) and how that reads.
+  sendAgent() {
+    const origin = this.prSel, space = origin?.space ?? focused()?.space ?? null;
+    const agent = origin?.session ? this.sessionAgent(origin) : space ? this.target(space) : null;
+    return { agent, label: TH.agentLabel(agent, origin?.session ? "the PR's session, resumed in a new tab (claude --resume)" : "a new Claude tab in this repo") };
+  },
+  // Nothing is typed into an agent's session without this preview: who gets it, the reviewer's own words apart, the
+  // exact text (editable). go(text, cx): what "Send to agent" does with the confirmed text (default: deliver it).
+  previewSend(cx, { what, own, prompt, onSent, go }) {
+    const { agent, label } = this.sendAgent();
+    this.sendP = { ...TH.preview({ what, agent: label, own, prompt }), onSent, go, address: agent?.address ?? null };
+    this.sendText.set_value(prompt); this.finishOpen = false;
+    cx.notify();
+  },
+  sendConfirmed(cx) {
+    const p = this.sendP;
+    if (!p || this.sending) return;
+    const out = TH.confirm(p, this.sendText.value());
+    this.sendP = null;
+    if (p.fix?.target === "sub") return this.startSubFix(p, out.text, cx);
+    if (p.go) p.go(out.text, cx);
+    else this.deliver(out.text, cx, out.what, (cx) => p.onSent?.(cx));
+    cx.notify();
+  },
+
+  // "Reply" in a thread: one follow-up to the same agent with the thread as context (through the preview).
+  followup(cx) {
+    const th = this.threads().find((t) => t.id === this.replyTo), text = this.replyIn.value().trim();
+    if (!th || !text) return;
+    const replies = this.replies[th.id] ?? [], key = this.threadKey();
+    this.previewSend(cx, { what: "Reply", own: text, prompt: TH.followupPrompt({ pr: this.pr, thread: th, replies, text, file: this.repliesFile(), lang: this.lang() }),
+      onSent: (cx) => { this.updateThreads(cx, (d) => TH.addFollowup(d, key, th.id, text, replies.length)); this.replyIn.set_value(""); this.replyTo = null; } });
+  },
+  // A thread's buttons, left to right (clicks placed by x in onItem): Reply, the agent's last commit, GitHub, fold.
+  threadButtons(th, v = this.threadOfView(th)) {
+    const fv = this.fixView(this.fixOf(th.id));
+    const fix = !fv ? [{ label: "Fix…", act: (cx) => this.fixComments([th.id], cx) }]
+      : [...(fv.job.terminal ? [{ label: "Go to fix", act: () => this.goFix(fv.job) }] : []), ...(fv.commit && fv.job.target === "sub" ? [{ label: "Apply to PR", primary: true, act: (cx) => this.applyFix(fv.job, cx) }] : []),
+        ...(fv.job.target === "sub" ? [{ label: "Discard fix", act: (cx) => this.discardFix(fv.job, cx) }] : [])];
+    return [...fix, { label: "Reply", primary: !fv?.commit, act: (cx) => { this.replyTo = th.id; this.replyIn.set_value(""); cx.timer.after(0, () => this.replyIn.focus()); } },
+      ...(v.fixedIn || v.entries.some((e) => e.commit) ? [{ label: `Open ${String(v.fixedIn ?? [...v.entries].reverse().find((e) => e.commit).commit).slice(0, 7)}`, act: () => this.openCommit(v.fixedIn ?? [...v.entries].reverse().find((e) => e.commit).commit) }] : []),
+      ...(th.url ? [{ label: "On GitHub ↗", act: () => openUrl(th.url) }] : []),
+      ...(v.status === "fixed" ? [{ label: "Fold", act: () => this.openThreads.delete(th.id) }] : [])];
+  },
+  // ---- Fix: comments (pending or sent) and findings to a sub-agent in its own worktree (default) or the main agent,
+  // always through the preview; the sub-agent's branch is applied to the PR's checkout on "Apply to PR" (never pushed).
+
+  selected() { return TH.selectedOf(this.threadDoc, this.threadKey()); },
+  toggleSel(id, cx) { const key = this.threadKey(); this.updateThreads(cx, (d) => TH.toggleSelected(d, key, id)); },
+  fixes() { return TH.fixesOf(this.threadDoc, this.threadKey()); },
+  fixOf(id) { return TH.fixFor(this.threadDoc, this.threadKey(), id); },
+  // The PR's own checkout the fix branch starts from and is applied to: the session's folder, the branch's repo, else
+  // the review's checkout of the PR head.
+  fixBase() { return this.prSel?.cwd ?? (this.prSel?.space ? this.root : null) ?? this.worktree?.path ?? null; },
+  // A job's state for its rows: running (with its agent's status), ready (a fixed report with a commit), main.
+  fixView(job) {
+    const commit = job && TH.fixCommit(job, this.replies, this.find.reports);
+    const agent = job?.terminal ? agents().find((a) => a.address === job.terminal) : null;
+    return job ? { job, commit, status: agent?.status ?? (job.target === "main" ? "main agent" : "ended") } : null;
+  },
+  // Comments by id: the pending ones and the sent threads.
+  commentsById(ids) {
+    const all = [...TH.withIds(this.comments), ...this.threads()];
+    return ids.map((id) => all.find((c) => c.id === id)).filter(Boolean);
+  },
+  fixComments(ids, cx) {
+    const comments = this.commentsById(ids);
+    if (!comments.length) return;
+    const items = comments.map((c) => ({ kind: "comment", id: c.id }));
+    const prompt = (branch, path) => TH.fixCommentsPrompt({ pr: this.pr, comments, file: this.repliesFile(), lang: this.lang(), branch, path });
+    this.previewFix(cx, { what: comments.length === 1 ? "Fix" : `Fix ${comments.length}`, own: comments.map((c) => `${c.file} ${uiLine(c)}: ${c.text}`).join("\n\n"), items, prompt,
+      sent: (cx, how) => {
+        const key = this.threadKey(), pending = TH.withIds(this.comments).filter((c) => ids.includes(c.id));
+        if (pending.length) { this.comments = TH.withIds(this.comments).filter((c) => !ids.includes(c.id)); this.persist(cx); }
+        this.updateThreads(cx, (d) => TH.clearSelected(TH.addThreads(d, key, pending, how)));
+      } });
+  },
+  // The preview with the target choice; prompt(branch, path) gives the text for a sub-agent (its worktree) or the main agent.
+  previewFix(cx, { what, own, items, prompt, sent }) {
+    const ids = items.map((x) => x.id), branch = TH.fixBranch(this.prSel?.number, ids), path = TH.fixPath(home(), this.prSel?.repo, branch);
+    const { label } = this.sendAgent();
+    this.previewSend(cx, { what, own, prompt: prompt(branch, path), onSent: (cx) => {
+      const job = { id: `${Date.now().toString(36)}`, items, target: "main", at: Date.now(), state: "running" };
+      this.updateThreads(cx, (d) => TH.addFix(d, this.threadKey(), job));
+      sent(cx, { route: "agent", agent: label });
+    } });
+    this.sendP.fix = { target: "sub", branch, path, items, prompt, sent };
+  },
+  // The target switch in the preview: the text follows (a sub-agent gets its worktree note).
+  fixTarget(target) {
+    const f = this.sendP?.fix;
+    if (!f || f.target === target) return;
+    f.target = target;
+    this.sendText.set_value(target === "sub" ? f.prompt(f.branch, f.path) : f.prompt(null, null));
+  },
+  // A new Claude as a sub-agent of the PR's agent, in a fresh worktree on the fix branch from the PR's checkout's HEAD.
+  startSubFix(p, text, cx) {
+    const f = p.fix, base = this.fixBase(), key = this.threadKey();
+    if (!base) { this.note = "Not started: the PR has no local checkout to branch the fix from"; return cx.notify(); }
+    this.sending = true; this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        const git = (args) => exec("git", ["-C", base, ...args], { timeout: 60000 });
+        const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+        if (!head) throw new Error(`${base} is not a git checkout`);
+        await exec("mkdir", ["-p", f.path.replace(/\/[^/]+$/, "")]).catch(() => null);
+        const w = await git(["worktree", "add", "-b", f.branch, f.path, head]);
+        if (w.code !== 0) throw new Error(w.stderr.trim().slice(0, 200));
+        const id = Date.now().toString(36), { agent } = this.sendAgent();
+        const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id }));
+        if (r.code !== 0) { await git(["worktree", "remove", "--force", f.path]); await git(["branch", "-D", f.branch]); throw new Error((r.stderr || r.stdout).trim().slice(0, 200)); }
+        const terminal = JSON.parse(r.stdout).address;
+        this.updateThreads(cx, (d) => TH.addFix(d, key, { id, branch: f.branch, path: f.path, base, head, items: f.items, terminal, target: "sub", at: Date.now(), state: "running" }));
+        f.sent(cx, { route: "agent", agent: `Fix sub-agent · ${f.branch}` });
+        this.note = `Fix started: a sub-agent works on ${f.branch} in its own worktree`;
+      } catch (e) { this.note = `Not started: ${String(e).replace(/^Error: /, "")}`; }
+      finally { this.sending = false; cx.notify(); }
+    });
+  },
+  goFix(job) { if (job?.terminal) run("terminal.peek", { terminal: job.terminal }); },
+  // Apply to PR: the branch's commits cherry-picked onto the PR's checkout, only when it is clean (else the main agent
+  // can do it, through the preview); then the worktree and branch go. Nothing is pushed.
+  applyFix(job, cx) {
+    const key = this.threadKey(), git = (args) => exec("git", ["-C", job.base, ...args], { timeout: 120000 });
+    cx.spawn(async (cx) => {
+      const plan = TH.applyPlan({ status: (await git(["status", "--porcelain"])).stdout, head: job.head, branch: job.branch });
+      if (!plan.ok) {
+        this.note = `${plan.reason} Hand the cherry-pick to the main agent instead (Hand over…).`; this.applyBlocked = job;
+        return cx.notify();
+      }
+      const r = await git(plan.args);
+      if (r.code !== 0) { await git(["cherry-pick", "--abort"]); this.note = `Not applied (conflict?): ${r.stderr.trim().slice(0, 200)}`; return cx.notify(); }
+      await git(["worktree", "remove", "--force", job.path]); await git(["branch", "-D", job.branch]);
+      if (job.terminal) run("terminal.kill", { terminal: job.terminal });
+      this.updateThreads(cx, (d) => TH.setFix(d, key, job.id, { state: "applied", appliedAt: Date.now() }));
+      this.applyBlocked = null; this.note = `Applied ${job.branch} to the PR's checkout (not pushed). Verify when you're ready.`;
+      cx.notify();
+    });
+  },
+  handOverApply(job, cx) {
+    this.previewSend(cx, { what: "Apply fix", own: "", prompt: TH.applyPrompt(job), onSent: () => { this.applyBlocked = null; } });
+  },
+  discardFix(job, cx) {
+    const key = this.threadKey(), git = (args) => exec("git", ["-C", job.base, ...args], { timeout: 60000 });
+    cx.spawn(async (cx) => {
+      if (job.terminal) run("terminal.kill", { terminal: job.terminal });
+      if (job.path) { await git(["worktree", "remove", "--force", job.path]); await git(["branch", "-D", job.branch]); }
+      this.updateThreads(cx, (d) => TH.setFix(d, key, job.id, { state: "discarded" }));
+      this.note = `Discarded ${job.branch ?? "the fix"}`; cx.notify();
+    });
+  },
+
+  // A commit an agent named: its diff on GitHub (a PR there), else a note.
+  openCommit(sha) {
+    const m = /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(this.prSel?.url ?? "");
+    if (m) openUrl(`https://github.com/${m[1]}/commit/${sha}`); else this.note = `Commit ${sha}: open it with git show ${sha}`;
+  },
+
+  // ---- comment cards (GitHub-like, compact): pending comments, sent threads and notes under their line. A card is up to
+  // three rows of the list: its head (avatar, author, time, status, a ghost action and ⋯), its body (text and replies)
+  // and, for a sent thread, a one-line Reply. Clicks are placed by x in each row (cardClick).
+
+  cardItems(k, obj, loose = false) {
+    const card = { t: "ch", k, obj, loose }, c = this.cardOf(card);
+    if (c.folded) return [card];
+    return [card, { t: "cb", k, obj, loose }, ...(k === "th" ? [{ t: "cr", k, obj }] : [])];
+  },
+  cardMax() { return Math.max(320, Math.min(CARD_W, (this.listW ?? 900) - GUTTER - 16)); },
+  // A card is as wide as its text needs, 420 to 720 px (narrower only when the diff is).
+  cardW(c) {
+    const longest = c ? Math.max(String(c.text).split("\n").reduce((n, l) => Math.max(n, l.length), 0) * 7.4 + 28, ...c.replies.map((r) => r.text.length * 7 + 60), 300 + c.status[0].length * 6.5) : CARD_W;
+    return Math.min(this.cardMax(), Math.max(CARD_MIN, Math.round(longest)));
+  },
+  // Lines a text takes in a card (UI font ≈ 7.4 px per char at 13.5 px).
+  cardLines(text, w = this.cardMax()) { return Math.max(1, Math.ceil(String(text).length / Math.max(30, (w - 28) / 7.4))) + (String(text).match(/\n/g)?.length ?? 0); },
+  cardByKey(key) {
+    const [k, ...rest] = key.split(":"), id = rest.join(":");
+    const obj = k === "c" ? TH.withIds(this.comments).find((c) => c.id === id) : k === "th" ? this.threads().find((x) => x.id === id) : this.pins().find((x) => x.id === id);
+    return obj ? this.cardOf({ k, obj }) : null;
+  },
+  // What a card shows and offers: {key, src, author, time, status: [label, colour], text, replies, action: [label, fn] |
+  // null, menu: [[label, danger, fn]], folded: one-line text | null, sel}.
+  cardOf(it) {
+    const o = it.obj, hm = (ms) => (Number.isFinite(ms) ? new Date(ms).toTimeString().slice(0, 5) : "");
+    const where = (x) => `${x.file}:${x.start ?? x.end}${x.end !== x.start && x.start !== undefined ? `-${x.end}` : ""}`;
+    if (it.k === "c") {
+      const id = TH.commentId(o);
+      return { key: `c:${id}`, id, src: o.from === "ki" ? "ai" : "mine", author: "You", time: hm(Number.parseInt(o.id, 36)), sel: true,
+        status: [it.loose ? `Pending · ${uiLine(o)}, not shown` : o.from === "ki" ? "Pending · from AI suggestion" : "Pending", "ansi3"], text: o.text, replies: [], folded: null,
+        action: ["Fix", (cx) => this.fixComments([id], cx)],
+        menu: [["Edit", false, (cx) => this.openComposer(cx, o)], ["Fix…", false, (cx) => this.fixComments([id], cx)], ["Select", false, (cx) => this.toggleSel(id, cx)],
+          ["Copy position", false, () => copyText(where(o))], ["Delete", true, (cx) => this.dropComment(o, cx)]] };
+    }
+    if (it.k === "th") {
+      const v = this.threadOfView(o), fv = this.fixView(this.fixOf(o.id)), agent = o.agent?.split(" · ")[0] || "Agent";
+      const status = fv?.commit ? ["Fix ready", "ansi2"] : fv ? [`Fixing · ${fv.status}`, "ansi3"] : v.status === "fixed" ? [`Fixed${v.fixedIn ? ` in ${v.fixedIn.slice(0, 7)}` : ""}`, "ansi2"]
+        : v.status === "wontfix" ? ["Declined", "muted"] : v.status === "answered" || v.status === "question" ? ["Agent replied", "accent"]
+        : o.route === "github" ? [o.dry ? "Dry run: not posted" : "Posted", "ansi4"] : ["Sent to agent", "ansi6"];
+      const action = fv?.commit && fv.job.target === "sub" ? ["Apply to PR", (cx) => this.applyFix(fv.job, cx)] : fv ? ["Go to fix", () => this.goFix(fv.job)] : ["Fix", (cx) => this.fixComments([o.id], cx)];
+      return { key: `th:${o.id}`, id: o.id, src: "mine", author: "You", time: hm(o.sentAt), sel: true, status, text: o.text, action,
+        folded: v.collapsed ? `You: ${plain(o.text)} · ${status[0]}` : null,
+        replies: v.entries.filter((e) => this.show().agents || e.who !== "agent").map((e) => ({ author: e.who === "you" ? "You" : e.who === "agent" ? agent : e.who, src: e.who === "you" ? "mine" : e.who === "agent" ? "agents" : "github",
+          text: e.text, status: e.status ? [{ fixed: `Fixed${e.commit ? ` in ${String(e.commit).slice(0, 7)}` : ""}`, wontfix: "Declined", answered: "Answered", question: "Question" }[e.status] ?? e.status, THREAD_COLOR[e.status] ?? "muted"] : null })),
+        menu: [["Reply", false, (cx) => this.startReply(o.id, cx)], ...(fv?.job.terminal ? [["Go to fix", false, () => this.goFix(fv.job)]] : []),
+          ...(fv?.job.target === "sub" ? [["Discard fix", true, (cx) => this.discardFix(fv.job, cx)]] : []), ...(v.status === "fixed" || v.status === "wontfix" ? [[this.openThreads.has(o.id) ? "Fold" : "Unfold", false, () => { if (this.openThreads.has(o.id)) this.openThreads.delete(o.id); else this.openThreads.add(o.id); }]] : []),
+          ["Select", false, (cx) => this.toggleSel(o.id, cx)], ...(o.url ? [["Open on GitHub", false, () => openUrl(o.url)]] : []), ["Copy position", false, () => copyText(where(o))]] };
+    }
+    const open = this.openNotes?.has(o.id);
+    return { key: `pin:${o.id}`, id: o.id, src: "notes", author: "Note · private", time: hm(o.at), sel: false, status: [o.q ? `on: ${o.q}` : "Ask answer", "muted"], text: open ? o.text : o.summary,
+      replies: [], folded: null, action: ["To comment", (cx) => this.noteToComment(o, cx)],
+      menu: [[open ? "Show less" : "Show the whole answer", false, () => { this.openNotes ??= new Set(); if (open) this.openNotes.delete(o.id); else this.openNotes.add(o.id); }],
+        ["Turn into comment", false, (cx) => this.noteToComment(o, cx)], ["Copy position", false, () => copyText(where(o.anchor))], ["Unpin", true, (cx) => this.unpin(o.id, cx)]] };
+  },
+  startReply(id, cx) { this.replyTo = id; this.replyIn.set_value(""); cx.timer.after(0, () => this.replyIn.focus()); },
+  // Header geometry (x from the list's left edge): the box, the ghost action, ⋯.
+  cardZones(c) {
+    const right = GUTTER + this.cardW(c), aw = c.action ? Math.round(c.action[0].length * 7.2 + 30) : 0;
+    return { box: [GUTTER + 6, GUTTER + 26], menu: [right - 30, right - 6], action: [right - 34 - aw, right - 34] };
+  },
+  cardClick(it, x, cx) {
+    const c = this.cardOf(it), z = this.cardZones(c), inz = ([a, b]) => x >= a && x < b;
+    if (it.t === "ch" && c.folded) { this.openThreads.add(c.id); return; }
+    if (it.t === "ch" && c.sel && inz(z.box)) return this.toggleSel(c.id, cx);
+    if (it.t === "ch" && inz(z.menu)) {
+      openOverlay({ mod: "pr-review", props: { part: "cmenu", key: c.key, items: c.menu.map(([label, danger]) => [label, danger]) }, kind: "popup", width: 210, height: 12 + 30 * c.menu.length });
+      return;
+    }
+    if (it.t === "ch" && c.action && inz(z.action)) return c.action[1](cx);
+    if (it.t === "cr") return this.startReply(c.id, cx);
+    if (it.k === "c") return this.openComposer(cx, it.obj);
+    if (it.k === "pin") { this.openNotes ??= new Set(); if (this.openNotes.has(c.id)) this.openNotes.delete(c.id); else this.openNotes.add(c.id); }
+  },
+  cardRow(it, t) {
+    const c = this.cardOf(it), W = this.cardW(c), col = t[SOURCE[c.src]] ?? t.accent, selMode = this.selected().length > 0, sel = this.selected().includes(c.id);
+    const avatar = (name, src, size = 18) => div().w(size).h(size).flex_none().rounded_full().flex().items_center().justify_center().bg((t[SOURCE[src]] ?? t.accent) + "33")
+      .text_size(size * 0.58).font_semibold().text_color(t.foreground).child(String(name).replace(/^Note.*/, "N")[0]?.toUpperCase() ?? "?");
+    const pillC = ([label, k]) => div().flex_none().px(6).h(18).flex().items_center().rounded(9).border_1().border_color(t[k] ?? t.muted).text_size(11).text_color(t[k] ?? t.muted).child(label);
+    // The card's surface: lighter than the diff, a 1 px border all round (the head, body and reply rows draw their parts
+    // of it), rounded 8, the source's stripe on the left.
+    const bg = c.src === "notes" ? t.ansi5 + "14" : t.raised, stripe = (e) => e.child(div().absolute().left(0).top(0).bottom(0).w(3).bg(col));
+    const frame = (e) => e.relative().w(W).bg(bg).border_color(t.border).border_l(1).border_r(1);
+    if (it.t === "ch" && c.folded) {
+      return div().w_full().h(28 + 2 * CARD_GAP).pl(GUTTER).py(CARD_GAP).child(stripe(frame(h_flex()).h(28).pl(12).pr(10).gap(8).items_center().border_t(1).border_b(1).rounded(8).overflow_hidden().text_size(12.5).cursor_pointer()
+        .child(div().flex_none().text_color(t.muted).child("▸")).child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(c.folded))));
+    }
+    if (it.t === "ch") {
+      const z = this.cardZones(c);
+      return div().w_full().h(CARD_HEAD).pl(GUTTER).pt(CARD_GAP).child(stripe(frame(h_flex()).h(CARD_HEAD - CARD_GAP).pl(8).pr(6).gap(6).items_center().border_t(1).rounded_tl(8).rounded_tr(8).overflow_hidden().text_size(12)
+        .when(c.sel, (e) => e.child(div().id(`rv-cbox-${c.key}`).w(14).h(14).flex_none().rounded(3).border_1().border_color(sel ? t.accent : t.input).bg(sel ? t.accent : t.background)
+          .flex().items_center().justify_center().text_size(10).text_color(t.accent_foreground).opacity(selMode ? 1 : 0).hover((s) => s.opacity(1)).child(sel ? "✓" : "")))
+        .child(avatar(c.author, c.src)).child(div().flex_none().font_semibold().text_color(c.src === "notes" ? t.ansi5 : t.foreground).child(c.author))
+        .child(div().flex_none().text_color(t.muted).child(c.time)).child(pillC(c.status))
+        .child(div().flex_1())
+        .when(Boolean(c.action), (e) => e.child(div().w(z.action[1] - z.action[0]).h(22).flex_none().flex().items_center().justify_center().gap(4).rounded(5)
+          .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child(c.action[0] === "Fix" ? "✦ Fix" : c.action[0])))
+        .child(div().w(24).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child("⋯"))));
+    }
+    if (it.t === "cr") {
+      return div().w_full().h(CARD_REPLY + CARD_GAP).pl(GUTTER).pb(CARD_GAP).child(stripe(frame(h_flex()).h(CARD_REPLY).px(12).items_center().border_b(1).rounded_bl(8).rounded_br(8).overflow_hidden()
+        .child(div().flex_1().h(24).px(8).flex().items_center().rounded(5).border_1().border_color(t.border).bg(t.background).text_size(12.5).text_color(t.muted).cursor_text().child("Reply…"))));
+    }
+    const reply = (r, k) => v_flex().id(`rv-crp-${c.key}-${k}`).ml(22).gap(1).pt(4)
+      .child(h_flex().h(20).gap(6).items_center().text_size(11.5).child(avatar(r.author, r.src, 16)).child(div().font_semibold().child(r.author)).when(Boolean(r.status), (e) => e.child(pillC(r.status))))
+      .child(div().pl(22).max_h(19 * 8).overflow_hidden().text_size(12.5).line_height(1.5).whitespace_normal().text_color(t.foreground).child(plain(r.text)));
+    const last = it.k !== "th";
+    return div().w_full().h(this.sizeOf(it)).pl(GUTTER).when(last, (e) => e.pb(CARD_GAP)).child(stripe(frame(v_flex()).h_full().px(12).pt(2).pb(8).overflow_hidden()
+      .when(last, (e) => e.border_b(1).rounded_bl(8).rounded_br(8)).text_size(13.5)
+      .child(div().line_height(1.48).whitespace_normal().text_color(t.foreground).child(c.text))
+      .children(c.replies.map(reply))));
+  },
+
   // ---- the inline composer (a row of the diff list under the selection; edit: in place of that comment)
 
   openComposer(cx, edit = null, scroll = false) {
@@ -1130,7 +1557,7 @@ export const ReviewMode = {
   // The composer's buttons, left to right: x from the list's left edge (clicks are placed by x, see onItem).
   composeButtons() {
     const list = this.editing ? [["Suggestion", 104, "insertSuggestion"], ["Cancel", 80, "closeComposer"], ["Update comment", 140, "addDraft", true]]
-      : [["Suggestion", 104, "insertSuggestion"], ["Cancel", 80, "closeComposer"], ["Add single comment", 160, "singleComment"],
+      : [["Suggestion", 104, "insertSuggestion"], ["Cancel", 80, "closeComposer"], [this.routeNow() === "github" ? "Post now to GitHub" : "Send to agent…", 160, "singleComment"],
         [this.comments.length ? "Add review comment" : "Start a review", 160, "addDraft", true]];
     let x = GUTTER + 16; // the card's 4 px border and 12 px padding
     return list.map(([label, w, act, primary], i) => { const b = { label, w, act, primary, x: x + (i === 1 ? 24 : 0) }; x = b.x + w + BTN_GAP; return b; });
@@ -1167,13 +1594,44 @@ export const ReviewMode = {
     this.fsel = null; this.closeComposer(cx); this.persist(cx);
   },
 
-  // "Add single comment": this one comment alone, now, where reviews go (GitHub: a review with one comment; agent: its prompt).
+  // "Post now to GitHub" / "Send to agent…": this one comment alone, now. GitHub: one review comment at once; agent: the
+  // preview first. Either way it then stays under its line as a thread; on failure it stays in the composer.
   singleComment(cx) {
-    const c = this.draftComment();
+    const c = this.draftComment(), key = this.threadKey();
     if (!c) return cx.notify();
-    const done = (cx) => { this.fsel = null; this.closeComposer(cx); };
-    if (this.routeNow() === "github") this.postGh([c], "comment", "", cx, done);
-    else this.deliver(buildReview({ pr: this.pr, base: this.base, comments: [c], lang: this.lang() }), cx, "Comment", done);
+    const done = (cx, how) => { this.updateThreads(cx, (d) => TH.addThreads(d, key, [c], how)); this.fsel = null; this.closeComposer(cx); };
+    if (this.routeNow() === "github") { setShared("review.hintPostNow", true); return this.postSingleGh(c, cx, done); }
+    const { label } = this.sendAgent();
+    this.previewSend(cx, { what: "Comment", own: c.text, prompt: buildReview({ pr: this.pr, base: this.base, comments: [c], lang: this.lang(), replies: this.repliesFile(), contract: TH.repliesContract }),
+      onSent: (cx) => done(cx, { route: "agent", agent: label }) });
+  },
+
+  // One line comment on GitHub now (POST pulls/{n}/comments), as the PR's context; dry run: the payload into a file.
+  postSingleGh(c, cx, done) {
+    const pr = this.prSel, m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(pr?.url ?? "");
+    if (!m || this.sending) return;
+    const payload = TH.singlePayload(c, this.head, inDiff(this.diffLines ?? new Map(), c));
+    if (!payload) { this.note = "Not posted: GitHub takes line comments only on lines of the PR diff. Use Start a review: it goes into the review body."; return cx.notify(); }
+    this.sending = true; this.note = null;
+    const env = this.ctxEnv(this.ctxId()), sh = (script, ...args) => exec(env[0] ?? "sh", [...env.slice(1), ...(env.length ? ["sh"] : []), "-c", script, ...args], { timeout: 60000 });
+    cx.spawn(async (cx) => {
+      try {
+        if (this.cfg?.dryRun) {
+          const file = `${appHome()}/pr-data/review-dry-run.json`, before = await readTextFile(file).catch(() => null);
+          await writeTextFile(file, JSON.stringify({ endpoint: `repos/${m[1]}/pulls/${m[2]}/comments`, payload }, null, 1), before);
+          this.note = `Dry run: nothing posted, the payload is in ${file.replace(home(), "~")}`;
+          return done(cx, { route: "github", dry: true });
+        }
+        const r = await sh('printf %s "$1" | gh api -X POST "$0" --input -', `repos/${m[1]}/pulls/${m[2]}/comments`, JSON.stringify(payload));
+        if (r.code !== 0) { let msg = (r.stderr || "").trim(); try { msg = JSON.parse(r.stdout).message ?? msg; } catch { /* not JSON */ } throw new Error(msg || "gh api failed"); }
+        const j = JSON.parse(r.stdout);
+        this.note = `Posted to GitHub: ${j.html_url ?? pr.url}`;
+        done(cx, { route: "github", gh: { [c.id]: { ghId: j.id, url: j.html_url } } });
+        this.loadGhComments(cx);
+      } catch (e) { this.note = `Not posted: ${String(e).replace(/^Error: /, "")}`; } // the composer keeps the draft
+      finally { this.sending = false; cx.notify(); }
+    });
+    cx.notify();
   },
 
   // ---- where reviews go: GitHub (any PR there) or the PR's agent session (a PR made in a session; branch diffs)
@@ -1188,15 +1646,39 @@ export const ReviewMode = {
   },
 
   // Submit review (the popover): every pending comment, the verdict and the summary, in one go.
+  // GitHub: exactly the ticked items (threads.js ghPlan); agent: every pending comment, through the preview. What went
+  // out stays as threads.
   submitReview(cx) {
-    const sent = this.comments, summary = this.summary.value();
-    const done = (cx) => {
-      this.comments = this.comments.filter((c) => !sent.includes(c)); this.summary.set_value(""); this.event = "comment";
+    const gh = this.routeNow() === "github", key = this.threadKey(), summary = this.summary.value();
+    const sent = gh ? this.ghPlanNow().picked : TH.withIds(this.comments);
+    const done = (cx, how) => {
+      const ids = new Set(sent.map((c) => c.id));
+      this.comments = TH.withIds(this.comments).filter((c) => !ids.has(c.id)); this.summary.set_value(""); this.event = "comment"; this.off = new Set(); this.summaryOn = true;
+      this.updateThreads(cx, (d) => TH.addThreads(d, key, sent, how));
       this.persist(cx); this.registerReview(cx, { status: "sent", sentAt: Date.now() });
     };
-    if (this.routeNow() === "github") return this.postGh(sent, this.event, summary, cx, done);
+    if (gh) return this.postGh(sent, this.event, this.summaryOn ? summary : "", cx, done);
     if (!sent.length) { this.note = "Nothing to send: add a comment first"; return cx.notify(); }
-    this.deliver(buildReview({ pr: this.pr, base: this.base, comments: sent, lang: this.lang(), event: this.event, summary }), cx, "Review", (cx) => { done(cx); this.finishOpen = false; });
+    const { label } = this.sendAgent();
+    this.previewSend(cx, { what: "Review", own: [summary.trim(), ...sent.map((c) => `${c.file} ${uiLine(c)}: ${c.text}`)].filter(Boolean).join("\n\n"),
+      prompt: buildReview({ pr: this.pr, base: this.base, comments: sent, lang: this.lang(), event: this.event, summary, replies: this.repliesFile(), contract: TH.repliesContract }),
+      onSent: (cx) => done(cx, { route: "agent", agent: label }) });
+  },
+  // The gh login that posts for this PR's context (its env picks the account), asked once per context.
+  loadGhLogin(cx) {
+    const id = this.ctxId();
+    if (this.ghLogin?.[id] !== undefined) return;
+    this.ghLogin = { ...this.ghLogin, [id]: null };
+    const argv = [...this.ctxEnv(id), "gh", "api", "user", "--jq", ".login"];
+    cx.spawn(async (cx) => {
+      const r = await exec(argv[0], argv.slice(1), { timeout: 20000 }).catch(() => null);
+      if (r?.code === 0 && r.stdout.trim()) { this.ghLogin = { ...this.ghLogin, [id]: r.stdout.trim() }; cx.notify(); }
+    });
+  },
+  ghPlanNow() {
+    const repo = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(this.prSel?.url ?? "");
+    return TH.ghPlan({ comments: this.comments, off: this.off, summary: this.summary.value(), summaryOn: this.summaryOn, event: this.event, commit: this.head,
+      lines: this.diffLines ?? new Map(), repo: repo ? `${repo[1]}#${repo[2]}` : null, login: this.ghLogin?.[this.ctxId()] ?? null });
   },
 
   // One GitHub review with these comments (pr.js ghReview), JSON on stdin, as the PR's context (its gh account).
@@ -1218,9 +1700,9 @@ export const ReviewMode = {
         if (this.cfg?.dryRun) {
           const file = `${appHome()}/pr-data/review-dry-run.json`, before = await readTextFile(file).catch(() => null);
           await writeTextFile(file, JSON.stringify({ endpoint: `repos/${m[1]}/pulls/${m[2]}/reviews`, payload }, null, 1), before);
-          this.posted = { dry: file, outside: outside.length };
+          this.posted = { dry: file, outside: outside.length, items: TH.postedItems(payload) };
           this.note = `Dry run: nothing posted, the payload is in ${file.replace(home(), "~")}`;
-          return;
+          return done(cx, { route: "github", dry: true });
         }
         const r = await sh('printf %s "$1" | gh api -X POST "$0" --input -', `repos/${m[1]}/pulls/${m[2]}/reviews`, JSON.stringify(payload));
         if (r.code !== 0) {
@@ -1229,9 +1711,14 @@ export const ReviewMode = {
           const where = payload.comments.map((c) => `${c.path}:${c.start_line ? `${c.start_line}–` : ""}${c.line}`).join(", ");
           throw new Error(`${msg || "gh api failed"}${/diff|line|position/i.test(msg) && where ? ` (line comments: ${where})` : ""}`);
         }
-        const url = JSON.parse(r.stdout).html_url ?? pr.url;
-        this.posted = { url }; this.note = `Review posted: ${url}`;
-        done(cx);
+        const review = JSON.parse(r.stdout), url = review.html_url ?? pr.url;
+        // The posted line comments' ids (by path, line and text), so their GitHub replies land in their threads.
+        const mine = review.id ? await sh('gh api "$0" --jq ".[] | {id, path, line, body, url: .html_url}"', `repos/${m[1]}/pulls/${m[2]}/reviews/${review.id}/comments`).catch(() => null) : null;
+        const got = (mine?.stdout ?? "").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean), map = {};
+        for (const c of TH.withIds(comments)) { const g = got.find((x) => x.path === c.file && x.line === c.end && x.body === c.text.trim()); if (g) map[c.id] = { ghId: g.id, url: g.url }; }
+        this.posted = { url, items: TH.postedItems(payload) }; this.note = `Review posted: ${url}`;
+        done(cx, { route: "github", gh: map });
+        this.loadGhComments(cx);
       } catch (e) { this.note = `Not posted: ${String(e).replace(/^Error: /, "")}`; }
       finally { this.sending = false; cx.notify(); }
     });
@@ -1243,7 +1730,7 @@ export const ReviewMode = {
     const pr = this.prSel, m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(pr?.url ?? "");
     if (!m || this.cfg?.dryRun) return; // dry run: no network (the demo)
     const env = this.ctxEnv(this.ctxId()), argv = [...env, "gh", "api", "--paginate", `repos/${m[1]}/pulls/${m[2]}/comments?per_page=100`,
-      "--jq", ".[] | select(.line != null) | {id, path, line, side, user: .user.login, body, at: .created_at}"];
+      "--jq", ".[] | select(.line != null) | {id, path, line, side, user: .user.login, body, at: .created_at, in_reply_to_id, url: .html_url}"];
     cx.spawn(async (cx) => {
       const r = await exec(argv[0], argv.slice(1), { timeout: 30000 }).catch(() => null);
       if (r?.code !== 0 || this.prSel?.url !== pr.url) return;
@@ -1253,8 +1740,13 @@ export const ReviewMode = {
   },
 
   onReviewKey(e, cx) {
-    if (this.typing) {
+    const route = keyRoute({ typing: this.typing, rootFocused: this.fh.is_focused(), key: e.key });
+    if (route === "pass") return; // an input inside the review has the keyboard: its letters are text
+    if (route === "blur") { this.fh.focus(); cx.notify(); return cx.stop_propagation(); }
+    if (route === "typing") {
       if (this.typing === "draft" && e.keystroke === "cmd-enter") this.addDraft(cx);
+      else if (e.key === "escape" && this.typing === "send") { this.sendP = null; this.fh.focus(); cx.notify(); }
+      else if (e.key === "escape" && this.typing === "item") { this.editItem = null; this.fh.focus(); cx.notify(); }
       else if (e.key === "escape" && this.typing === "summary") { this.finishOpen = false; this.fh.focus(); cx.notify(); }
       else if (e.key === "escape") this.closeComposer(cx);
       else return;
@@ -1270,7 +1762,7 @@ export const ReviewMode = {
     else if (k === "shift-/" || e.key === "?") this.command("keys", cx);
     else if (k === "a" || k === "x") { const s = this.focusedSug(); if (s) (k === "a" ? this.takeSug(s, cx) : this.dropSug(s, cx)); }
     else if (k === "s" || k === "f") this.tab = k === "s" ? "steps" : "files";
-    else if (k === "escape") { if (this.finishOpen) this.finishOpen = false; else if (this.composing) this.closeComposer(cx); else if (this.defFile) this.defFile = null; else if (this.defAt) this.defAt = null; else if (this.archFocus || this.blastFocus) this.archFocus = this.blastFocus = null; else leave(); }
+    else if (k === "escape") { if (this.sendP) this.sendP = null; else if (this.replyTo) this.replyTo = null; else if (this.selected().length) this.clearSel(cx); else if (this.finishOpen) this.finishOpen = false; else if (this.composing) this.closeComposer(cx); else if (this.defFile) this.defFile = null; else if (this.defAt) this.defAt = null; else if (this.drawerState() === "open") this.setDrawer(null, cx); else if (this.archFocus || this.blastFocus || this.askHl) this.archFocus = this.blastFocus = this.askHl = null; else leave(); }
     else return;
     cx.stop_propagation(); cx.notify();
   },
@@ -1278,86 +1770,238 @@ export const ReviewMode = {
   // ---- render: Finish your review (opened from the bar's button: the "finish" command)
 
   finishPopover(t) {
-    const n = this.comments.length, routes = this.routes(), route = this.routeNow(), gh = route === "github";
-    const plan = gh ? ghReview({ comments: this.comments, event: this.event, commit: this.head, lines: this.diffLines ?? new Map() }) : null;
-    const repo = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(this.prSel?.url ?? "");
+    const all = TH.withIds(this.comments), n = all.length, routes = this.routes(), route = this.routeNow(), gh = route === "github";
+    const plan = gh ? this.ghPlanNow() : null, inline = new Set((plan?.picked ?? []).filter((c) => inDiff(this.diffLines ?? new Map(), c)).map((c) => c.id));
     const label = { comment: "Comment", approve: "Approve", request_changes: "Request changes" };
-    const radio = (k, what) => h_flex().id(`rv-ev-${k}`).gap(10).px(6).py(5).rounded(6).items_start().cursor_pointer().hover((s) => s.bg(t.hover))
+    const radio = (k, what) => h_flex().id(`rv-ev-${k}`).gap(10).px(6).py(4).rounded(6).items_start().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.event = k; cx.notify(); })
       .child(div().w(16).flex_none().text_color(this.event === k ? t.accent : t.muted).child(this.event === k ? "◉" : "○"))
       .child(v_flex().flex_1().min_w(0).child(div().font_semibold().child(label[k])).child(div().text_size(12).text_color(t.muted).whitespace_normal().child(what)));
-    const where = gh ? plan.payload.comments.map((c) => `${c.path} ${c.start_line ? `lines ${c.start_line}–${c.line}` : `line ${c.line}`}${c.side === "LEFT" ? " (old)" : ""}`) : this.comments.map((c) => `${c.file} ${uiLine(c)}`);
-    const ready = !this.sending && (gh || n > 0); // GitHub: a summary or a verdict alone is a review too
-    return v_flex().id("rv-finish").absolute().top(8).right(12).w(460).p(14).gap(10).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+    const tick = (id, on, click) => div().id(id).w(18).flex_none().text_size(14).cursor_pointer().text_color(on ? t.accent : t.muted).on_click((_e, cx) => { click(); cx.notify(); }).child(on ? "☑" : "☐");
+    const origin = (c) => (c.from === "ki" ? "from an AI suggestion" : c.from ? `from a ${REVIEWERS[c.from]?.[0] ?? c.from} finding` : null);
+    // Each item that can go out, ticked or not; GitHub: the summary too, and Edit in place.
+    const item = (c) => {
+      const on = !gh || !this.off.has(c.id), editing = this.editItem === c.id;
+      return h_flex().id(`rv-fi-${c.id}`).gap(8).items_start().p(6).rounded(6).bg(on ? t.surface : t.background)
+        .when(gh, (e) => e.child(tick(`rv-fit-${c.id}`, on, () => { if (on) this.off.add(c.id); else this.off.delete(c.id); })))
+        .child(v_flex().flex_1().min_w(0).gap(3)
+          .child(h_flex().gap(6).items_center().text_size(12)
+            .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(on ? t.foreground : t.muted).child(`${c.file} ${uiLine(c)}`))
+            .when(gh, (e) => e.child(div().flex_none().text_color(inline.has(c.id) || !on ? t.muted : t.ansi3).child(inDiff(this.diffLines ?? new Map(), c) ? "line comment" : "goes into the body")))
+            .when(!editing, (e) => e.child(pill(`rv-fie-${c.id}`, t, "Edit", (_e, cx) => { this.editItem = c.id; this.itemEdit.set_value(c.text); cx.timer.after(0, () => this.itemEdit.focus()); cx.notify(); }))))
+          .when(Boolean(origin(c)), (e) => e.child(div().text_size(11.5).text_color(t.ansi5).child(origin(c))))
+          .child(editing
+            ? v_flex().gap(6).child(div().h(90).px(8).py(4).rounded(6).border_1().border_color(t.accent).bg(t.background).cursor_text().on_click(() => this.itemEdit.focus())
+              .child(Textarea.new(this.itemEdit).size_full().text_size(13).text_color(t.foreground)))
+              .child(h_flex().gap(6).child(pill(`rv-fis-${c.id}`, t, "Save", (_e, cx) => { const text = this.itemEdit.value().trim(); if (text) { this.comments = all.map((x) => (x.id === c.id ? { ...x, text } : x)); this.persist(cx); } this.editItem = null; cx.notify(); }, false, t.foreground))
+                .child(pill(`rv-fic-${c.id}`, t, "Cancel", (_e, cx) => { this.editItem = null; cx.notify(); })))
+            : div().text_size(12.5).line_height(1.45).whitespace_normal().text_color(on ? t.foreground : t.muted).child(c.text)));
+    };
+    const summary = this.summary.value().trim(), repo = plan ? /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(this.prSel?.url ?? "") : null;
+    const ready = !this.sending && (gh ? plan.ready : n > 0);
+    return v_flex().id("rv-finish").absolute().top(8).right(12).w(520).max_h(760).p(14).gap(10).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .text_size(13).text_color(t.foreground).on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(h_flex().items_center().child(div().flex_1().font_semibold().text_size(14).child("Finish your review"))
         .child(pill("rv-finish-x", t, "✕", (_e, cx) => { this.finishOpen = false; this.fh.focus(); cx.notify(); })))
-      .child(div().id("rv-summary").h(96).px(10).py(6).rounded(6).border_1().border_color(this.typing === "summary" ? t.accent : t.border).bg(t.background).cursor_text()
-        .on_click(() => this.summary.focus()).child(Textarea.new(this.summary).size_full().text_size(13.5).text_color(t.foreground)))
-      .child(v_flex().gap(2)
-        .child(radio("comment", "Submit general feedback without explicit approval."))
-        .child(radio("approve", "Give your approval to merge these changes."))
-        .child(radio("request_changes", "Submit feedback that must be addressed before merging.")))
       .when(routes.length > 1, (e) => e.child(h_flex().gap(6).items_center().child(div().text_size(12).text_color(t.muted).child("Send to"))
         .child(pill("rv-route-github", t, "GitHub", (_e, cx) => { this.route = "github"; cx.notify(); }, route === "github"))
         .child(pill("rv-route-agent", t, "Agent session", (_e, cx) => { this.route = "agent"; cx.notify(); }, route === "agent"))))
-      // What the click sends, before it is sent.
-      .child(v_flex().gap(3).p(8).rounded(6).bg(t.surface).text_size(12)
-        .child(div().text_color(t.foreground).whitespace_normal().child(gh
-          ? `Posts one review to ${repo ? `${repo[1]}#${repo[2]}` : "GitHub"}: ${label[this.event]}, ${plan.payload.comments.length} line ${plan.payload.comments.length === 1 ? "comment" : "comments"}${plan.outside.length ? `, ${plan.outside.length} in the body` : ""}.`
-          : `Sends ${n} ${n === 1 ? "comment" : "comments"} (${label[this.event]}) to the PR's agent session.`))
-        .children(where.slice(0, 6).map((w) => div().truncate().text_color(t.muted).child(`· ${w}`)))
-        .when(where.length > 6, (e) => e.child(div().text_color(t.muted).child(`… and ${where.length - 6} more`)))
-        .when(gh && plan.outside.length > 0, (e) => e.children(plan.outside.slice(0, 3).map((c) => div().truncate().text_color(t.ansi3).child(`· ${c.file} ${uiLine(c) || "(no line)"}: not in the diff, goes into the body`)))))
-      .when(Boolean(this.posted?.url), (e) => e.child(h_flex().gap(8).items_center().text_size(12).text_color(t.ansi2)
-        .child(div().flex_1().min_w(0).truncate().child(`Posted: ${this.posted.url}`)).child(pill("rv-posted-open", t, "Open", () => openUrl(this.posted.url)))))
+      .child(div().text_size(12.5).text_color(t.muted).child(gh ? `Target: ${repo ? `${repo[1]}#${repo[2]}` : "GitHub"} on GitHub` : `Target: ${this.sendAgent().label}`))
+      .child(div().id("rv-summary").h(76).px(10).py(6).rounded(6).border_1().border_color(this.typing === "summary" ? t.accent : t.border).bg(t.background).cursor_text()
+        .on_click(() => this.summary.focus()).child(Textarea.new(this.summary).size_full().text_size(13.5).text_color(t.foreground)))
+      .child(v_flex().gap(1)
+        .child(radio("comment", "Submit general feedback without explicit approval."))
+        .child(radio("approve", "Give your approval to merge these changes."))
+        .child(radio("request_changes", "Submit feedback that must be addressed before merging.")))
+      // Exactly what goes out: nothing else (AI suggestions, findings, the analysis) unless it was added as a comment.
+      .child(div().text_size(11.5).font_semibold().text_color(t.muted).child(gh ? "WHAT IS POSTED (only what is ticked)" : `WHAT IS SENT · ${n} ${n === 1 ? "comment" : "comments"}`))
+      .child(div().flex_1().min_h(0).relative().max_h(330)
+        .child(v_flex().id("rv-finish-items").gap(4).max_h(330).overflow_y_scroll()
+          .when(gh, (e) => e.child(h_flex().id("rv-fi-summary").gap(8).items_start().p(6).rounded(6).bg(this.summaryOn && summary ? t.surface : t.background)
+            .child(summary ? tick("rv-fit-summary", this.summaryOn, () => { this.summaryOn = !this.summaryOn; }) : div().w(18).flex_none().text_size(14).text_color(t.dim).child("☐"))
+            .child(v_flex().flex_1().min_w(0).gap(2).child(div().text_size(12).font_semibold().text_color(summary ? t.foreground : t.muted).child("Review body (the summary above)"))
+              .child(div().text_size(12.5).whitespace_normal().text_color(summary && this.summaryOn ? t.foreground : t.muted).child(summary || "No body: write one above to post it")))))
+          .children(all.map(item))
+          .when(!n, (e) => e.child(div().p(6).text_size(12.5).text_color(t.muted).child("No pending comments. AI suggestions and findings go out only after you add them as comments.")))))
+      .when(Boolean(this.posted?.url || this.posted?.dry), (e) => e.child(v_flex().gap(2).p(8).rounded(6).bg(t.surface).text_size(12)
+        .child(h_flex().gap(8).items_center().text_color(this.posted.dry ? t.muted : t.ansi2)
+          .child(div().flex_1().min_w(0).truncate().child(this.posted.dry ? "Dry run: this is what would have been posted" : `Posted: ${this.posted.url}`))
+          .when(Boolean(this.posted.url), (x) => x.child(pill("rv-posted-open", t, "Open", () => openUrl(this.posted.url)))))
+        .children((this.posted.items ?? []).map((w) => div().truncate().text_color(t.muted).child(`· ${w}`)))))
       .when(Boolean(this.note) && /^(Not posted|Not sent|Dry run|Nothing)/.test(this.note ?? ""), (e) => e.child(div().text_size(12).whitespace_normal()
         .text_color(/^Dry run/.test(this.note) ? t.muted : t.ansi1).child(this.note)))
+      .when(gh, (e) => e.child(div().text_size(12.5).text_color(t.muted).whitespace_normal().text_right().child(plan.target)))
       .child(h_flex().gap(8).items_center()
         .when(n > 0, (e) => e.child(pill("rv-rdrop", t, "Discard pending", (_e, cx) => { this.comments = []; this.persist(cx); cx.notify(); })))
         .child(div().flex_1())
         .child(div().id("rv-submit").px(14).h(32).flex().items_center().rounded(8).text_size(13).font_semibold().bg(ready ? GH_GREEN : t.raised)
           .text_color(ready ? "#ffffff" : t.muted).when(ready, (e) => e.cursor_pointer())
-          .on_click((_e, cx) => { if (ready) this.submitReview(cx); }).child(this.sending ? "Submitting…" : "Submit review")));
+          .on_click((_e, cx) => { if (ready) this.submitReview(cx); }).child(this.sending ? "Submitting…" : gh ? plan.label : "Send to agent…")));
+  },
+
+  // The preview before anything is typed into an agent's session: who gets it, the reviewer's words apart, the exact
+  // text (editable); only "Send to agent" sends.
+  sendPopover(t) {
+    const p = this.sendP;
+    return v_flex().id("rv-send").absolute().top(8).right(12).w(600).p(14).gap(10).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .text_size(13).text_color(t.foreground).on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(h_flex().items_center().child(div().flex_1().font_semibold().text_size(14).child(p.fix ? `${p.what}: preview` : `${p.what}: send to agent`))
+        .child(pill("rv-send-x", t, "✕", (_e, cx) => { this.sendP = null; this.fh.focus(); cx.notify(); })))
+      .when(Boolean(p.fix), (e) => e.child(h_flex().gap(6).items_center().text_size(12.5).child(div().text_color(t.muted).child("Fix with"))
+        .child(pill("rv-fix-sub", t, "Sub-agent (default)", (_e, cx) => { this.fixTarget("sub"); cx.notify(); }, p.fix.target === "sub"))
+        .child(pill("rv-fix-main", t, "Main agent", (_e, cx) => { this.fixTarget("main"); cx.notify(); }, p.fix.target === "main"))))
+      .child(h_flex().gap(6).items_center().text_size(12.5).child(div().text_color(t.muted).child("To")).child(div().flex_1().min_w(0).whitespace_normal().font_semibold()
+        .child(p.fix?.target === "sub" ? `a new Claude${this.sendAgent().agent ? `, a sub-agent of ${p.agent.split(" · ")[0]},` : " (no live PR agent to put it under)"} in its own worktree on ${p.fix.branch}` : p.agent)))
+      .when(Boolean(p.own), (e) => e.child(v_flex().gap(4).child(div().text_size(11.5).font_semibold().text_color(t.muted).child("YOUR WORDS"))
+        .child(div().max_h(110).overflow_hidden().p(8).rounded(6).border_l(3).border_color(t.accent).bg(t.surface).text_size(12.5).line_height(1.45).whitespace_normal().child(p.own))))
+      .child(div().text_size(11.5).font_semibold().text_color(t.muted).child("EXACT TEXT SENT · your words plus generated instructions, editable"))
+      .child(div().id("rv-send-text").h(240).px(10).py(6).rounded(6).border_1().border_color(this.typing === "send" ? t.accent : t.border).bg(t.background).cursor_text()
+        .on_click(() => this.sendText.focus()).child(Textarea.new(this.sendText).size_full().text_size(12.5).text_color(t.foreground)))
+      .child(h_flex().gap(8).items_center().child(div().flex_1())
+        .child(pill("rv-send-cancel", t, "Cancel", (_e, cx) => { this.sendP = null; this.fh.focus(); cx.notify(); }))
+        .child(div().id("rv-send-go").px(14).h(32).flex().items_center().rounded(8).text_size(13).font_semibold().bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
+          .on_click((_e, cx) => this.sendConfirmed(cx)).child(this.sending ? "Sending…" : p.fix?.target === "sub" ? "Start sub-agent" : "Send to agent")));
+  },
+
+  // ---- the Comments tab and the Show switch (shared "review.show": per user, all on by default)
+
+  show() { return TH.showOf(shared("review.show")); },
+  toggleShow(k) { setShared("review.show", { ...this.show(), [k]: !this.show()[k] }); },
+  // Every comment of the PR as rows (threads.js commentRows), memoized on what they come from.
+  commentRowsNow() {
+    const deps = [this.comments, this.threadDoc, this.replies, this.gh, this.deep.pins, this.prSel?.url];
+    if (!this.rowsOf || this.rowsOf.deps.some((d, i) => d !== deps[i])) {
+      this.rowsOf = { deps, rows: TH.commentRows({ pending: this.comments ?? [], threads: this.threads(), replies: this.replies, gh: this.gh, ghOwn: this.ghOwn(), notes: this.pins() }) };
+    }
+    return this.rowsOf.rows;
+  },
+  showCountsNow() {
+    const agents = Object.values(this.replies ?? {}).reduce((n, r) => n + r.length, 0);
+    return TH.showCounts({ rows: this.commentRowsNow(), ai: this.openSugs().length + this.openFindings().length, agents });
+  },
+  // The switch as chips: what shows in the diff, with counts.
+  showChips(t, id) {
+    const show = this.show(), counts = this.showCountsNow();
+    return h_flex().flex_none().gap(4).items_center().child(div().text_size(12).text_color(t.muted).child("Show"))
+      .children(TH.SHOW_KINDS.map(([k, label]) => div().id(`${id}-${k}`).px(7).h(20).flex().items_center().gap(4).rounded(10).border_1().cursor_pointer().text_size(11.5)
+        .border_color(show[k] ? t[SOURCE[k]] ?? t.accent : t.border).text_color(show[k] ? t.foreground : t.dim).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.toggleShow(k); cx.notify(); }).child(label).child(div().text_color(t.muted).child(String(counts[k] ?? 0)))));
+  },
+  commentsPane(t) {
+    const all = this.commentRowsNow(), f = this.cfilter ?? "all", rows = TH.filterRows(all, f, this.show()), sel = new Set(this.selected());
+    const STATE = { pending: ["Pending", "ansi3"], waiting: ["Waiting on agent", "ansi6"], replied: ["Agent replied", "accent"], fixed: ["Fixed", "ansi2"], declined: ["Declined", "muted"], github: ["GitHub", "ansi4"], note: ["Note", "ansi5"] };
+    const chip = (k, label) => div().id(`rv-cf-${k}`).px(8).h(24).flex().items_center().rounded(6).cursor_pointer().text_size(12).border_1()
+      .bg(f === k ? t.selected : t.chrome).text_color(f === k ? t.foreground : t.muted).border_color(f === k ? t.accent : t.border).on_click((_e, cx) => { this.cfilter = k; cx.notify(); }).child(label);
+    const files = [...new Set(rows.map((r) => r.file))];
+    return v_flex().flex_1().min_h(0)
+      .child(v_flex().flex_none().px(14).py(10).gap(8).border_b(1).border_color(t.border)
+        .child(div().text_size(12.5).text_color(t.muted).whitespace_normal().child(TH.commentSummary(all) || "No comments yet"))
+        .child(h_flex().flex_wrap().gap(4).children([["all", "All"], ["pending", "Pending"], ["waiting", "Waiting"], ["replied", "Replied"], ["fixed", "Fixed"]].map(([k, l]) => chip(k, l))))
+        .child(h_flex().flex_wrap().child(this.showChips(t, "rv-cshow"))))
+      .child(div().flex_1().min_h(0).relative()
+        .child(v_flex().id("rv-comments-left").absolute().inset_0().overflow_y_scroll().p(8).gap(2)
+          .when(!rows.length, (e) => e.child(div().p(6).text_size(12.5).text_color(t.muted).child(all.length ? "Nothing matches these filters." : "Comments you write, send or post show here, with their replies.")))
+          .children(files.flatMap((file) => [div().pt(8).pb(2).px(6).text_size(11.5).font_semibold().text_color(t.muted).truncate().child(file),
+            ...rows.filter((r) => r.file === file).map((r) => {
+              const st = STATE[r.state], mine = r.kind === "pending" || r.kind === "thread";
+              return h_flex().id(`rv-cr-${r.id}`).gap(8).items_center().px(6).h(30).rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+                .on_click((_e, cx) => { if (r.kind === "thread") this.openThreads.add(r.id); if (r.kind === "note") (this.openNotes ??= new Set()).add(r.id); this.jumpTo(`${r.file}:${r.line}`, cx); })
+                .child(div().id(`rv-crb-${r.id}`).w(14).h(14).flex_none().rounded(3).border_1().border_color(sel.has(r.id) ? t.accent : mine ? t.input : "#00000000").bg(sel.has(r.id) ? t.accent : "#00000000")
+                  .flex().items_center().justify_center().text_size(10).text_color(t.accent_foreground).child(sel.has(r.id) ? "✓" : "")
+                  .when(mine, (e) => e.on_click((_e, cx) => { this.toggleSel(r.id, cx); cx.stop_propagation(); })))
+                .child(div().w(40).flex_none().text_size(11.5).text_color(t.muted).child(`${r.old ? "−" : ""}${r.line}`))
+                .child(div().flex_1().min_w(0).truncate().text_size(13).child(plain(String(r.text).split("\n")[0])))
+                .when(r.replies > 0, (e) => e.child(div().flex_none().text_size(11.5).text_color(t.muted).child(`↩ ${r.replies}`)))
+                .child(div().flex_none().px(6).h(18).flex().items_center().rounded(9).border_1().border_color(t[st[1]] ?? t.muted).text_size(11).text_color(t[st[1]] ?? t.muted).child(st[0]));
+            })])))
+        .child(Scrollbar.vertical("rv-comments-left").absolute().inset_0()));
+  },
+
+  // While comments are selected: a toolbar floating at the bottom centre of the diff (the list keeps room for it).
+  selectionBar(t) {
+    const n = this.selected().length, w = 340, left = Math.max(8, Math.round(((this.listW ?? 900) - w) / 2));
+    return h_flex().id("rv-selbar").absolute().bottom(12).left(left).w(w).h(38).pl(14).pr(5).gap(10).items_center().rounded_full().bg(t.popover).border_1().border_color(t.border).shadow_lg()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(div().flex_none().text_size(13).font_semibold().child(`${n} selected`))
+      .child(div().w(1).h(18).flex_none().bg(t.border))
+      .child(div().id("rv-selfix").flex_none().px(14).h(28).flex().items_center().rounded_full().bg(t.accent).text_color(t.accent_foreground).text_size(13).font_semibold().cursor_pointer()
+        .on_click((_e, cx) => this.fixComments(this.selected(), cx)).child(`✦ Fix selected (${n})`))
+      .child(div().flex_1())
+      .child(div().id("rv-selx").w(28).h(28).flex_none().flex().items_center().justify_center().rounded_full().text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip("Clear selection (Esc)").on_click((_e, cx) => this.clearSel(cx)).child("✕"));
+  },
+  clearSel(cx) { const key = this.threadKey(); this.updateThreads(cx, (d) => TH.clearSelected(d, key)); },
+
+  // "Reply" in a thread: the follow-up's input under the diff (Enter: the preview).
+  replyBar(t) {
+    const th = this.threads().find((x) => x.id === this.replyTo);
+    if (!th) return div();
+    return h_flex().flex_none().px(14).py(8).gap(8).items_center().border_t(1).border_color(t.border).bg(t.surface)
+      .child(div().flex_none().text_size(12.5).text_color(t.muted).child(`Reply on ${th.file.split("/").pop()} ${uiLine(th)}`))
+      .child(div().id("rv-reply-in").flex_1().min_w(0).h(30).px(8).flex().items_center().rounded(6).border_1().border_color(t.accent).bg(t.background).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.replyIn).h_full().text_size(13).text_color(t.foreground)))
+      .child(pill("rv-reply-go", t, "Send to agent…", (_e, cx) => this.followup(cx), false, t.foreground))
+      .child(pill("rv-reply-x", t, "Cancel", (_e, cx) => { this.replyTo = null; cx.notify(); }));
   },
 
   // ---- render: the bar
 
+  // Row 1, the bar copy: back, the title (all the room left, cut only at its end, whole as tooltip), repo#n, state and
+  // context; on the right only actions: Fix selected (while some are), Run review, Finish your review. The rest (risk,
+  // effort, checks, model, values, help, ⋯) is row 2 at the top of the review (metaRow).
   renderBar() {
-    const t = theme(), pr = shared("review.target"), meta = shared("review.meta") ?? {}, m = model();
-    const shown = meta.url === pr?.url ? meta.shown : null, busy = meta.url === pr?.url ? meta.busy : null, pending = meta.url === pr?.url ? meta.pending ?? 0 : 0;
+    if (shared("review.explore")) return this.renderExploreBar(shared("review.explore"));
+    const t = theme(), pr = shared("review.target"), meta = shared("review.meta") ?? {};
+    const pending = meta.url === pr?.url ? meta.pending ?? 0 : 0, selected = meta.url === pr?.url ? meta.selected ?? 0 : 0;
+    const title = pr ? `#${pr.number} ${pr.title ?? ""}` : "Review";
+    const runs = Object.values(shared("review.reviewers") ?? {}), openRuns = () => openOverlay({ mod: "pr-review", props: { part: "reviews" }, kind: "popup", width: 460, height: 250 });
+    const runLabel = runs.some((r) => r.busy) ? "Reviews running ⋯" : "Run review ▾";
     return h_flex().id("rv-bar").size_full().pl(84).pr(14).gap(10).items_center().bg(t.chrome).text_color(t.foreground).text_size(13.5)
-      .child(pill("rv-back", t, "← Back", () => leave()))
-      .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(14).child(pr ? `#${pr.number} ${pr.title ?? ""}` : "Review"))
+      .child(pill("rv-back", t, "← Back", () => leave()).flex_none())
+      .child(div().id("rv-title").flex_1().min_w(0).truncate().font_semibold().text_size(14).tooltip(title).child(title))
       .when(Boolean(pr), (e) => e.child(div().flex_none().text_size(12).text_color(t.muted).child(`${pr.repo ?? ""}#${pr.number ?? ""}`))
         .child(badge(t, pr.state ?? "?", t[{ open: "ansi2", draft: "dim", merged: "ansi5", closed: "ansi1" }[pr.state]] ?? t.dim))
         .when(C.tagged(ctxDoc()), (e) => e.child(badge(t, C.labelOf(ctxDoc(), prCtx(pr)), C.colorOf(ctxDoc(), prCtx(pr), t)))))
-      .when(Boolean(shown?.mergeRisk || shown?.effort), (e) => e.child(this.riskBadges(t, shown, "rv-bar")))
-      .when(Boolean(meta.url === pr?.url && meta.checks && meta.checks.ok + meta.checks.fail > 0), (e) => e.child(pill("rv-checks-btn", t,
-        h_flex().gap(6).child("Pre-merge checks").child(div().text_color(t.ansi2).child(`✓ ${meta.checks.ok}`)).child(div().text_color(meta.checks.fail ? t.ansi1 : t.muted).child(`✗ ${meta.checks.fail}`)),
-        () => run("pr-review.page:overview"))))
-      .child(pill("rv-done", t, "Mark done", () => run("pr-review.done")))
-      .child(div().id("rv-keys").w(26).h(26).flex().items_center().justify_center().rounded_full().border_1().border_color(t.border).text_size(12.5).text_color(t.muted)
-        .cursor_pointer().hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stop).tooltip("Keyboard shortcuts")
-        .on_click(() => openOverlay({ mod: "pr-review", props: { part: "keys" }, kind: "popup", width: 330, height: 250 })).child("?"))
-      .child(pill("rv-reviews-btn", t, Object.values(shared("review.reviewers") ?? {}).some((r) => r.busy) ? "Reviews ⋯" : "Reviews ▾",
-        () => openOverlay({ mod: "pr-review", props: { part: "reviews" }, kind: "popup", width: 460, height: 250 })))
-      .when(Boolean(this.worktree?.path) && !this.trustedPr(), (e) => e.child(div().id("rv-trust-wrap").tooltip("Restricted Mode: someone else's code, so language servers don't run anything from the repository and go-to-definition may find less. Click to trust this PR.")
-        .child(pill("rv-trust", t, "Restricted Mode · Trust", (_e, cx) => this.trust("pr", cx), false, t.ansi3))))
-      .child(pill("rv-values", t, `Values: ${valuesOn() ? "On" : "Off"}`, () => setShared("review.values", !valuesOn()), valuesOn()))
-      // Shrinks (its status text truncates) so "Finish your review" stays on screen in a narrow window.
-      .child(h_flex().min_w(0).overflow_hidden().gap(4).p(3).items_center().rounded(8).border_1().border_color(t.border)
-        .children(Object.entries(MODELS).map(([k, v]) => pill(`rv-m-${k}`, t, v.label, () => setShared("review.model", k), m === k).flex_none()))
-        .child(div().min_w(0).truncate().px(6).text_size(12).text_color(meta.error ? t.ansi1 : t.muted)
-          .child(busy ? h_flex().gap(6).child(div().child(SPIN[0]).frames(SPIN, 90)).child(`${MODELS[busy]?.label} analyzing…`)
-            : shown ? `${MODELS[shown.model]?.label ?? shown.model}${shown.cost != null ? ` · $${shown.cost.toFixed(3)}` : ""}${shown.exact ? "" : " · older diff"}`
-            : meta.error ? "Analysis failed" : "Not analyzed")))
+      .when(selected > 0, (e) => e.child(div().id("rv-bar-fixsel").flex_none().px(12).h(30).flex().items_center().rounded(7).bg(t.accent).text_color(t.accent_foreground)
+        .text_size(13).font_semibold().cursor_pointer().on_mouse_down("left", stop).on_click(() => run("pr-review.fix")).child(`✦ Fix selected (${selected})`)))
+      // Until a reviewer ran, the deep review is the button to find: green, like Finish your review.
+      .child(runs.some((r) => r.at || r.busy) ? pill("rv-reviews-btn", t, runLabel, openRuns).flex_none()
+        : div().id("rv-reviews-btn").flex_none().px(12).h(30).flex().items_center().rounded(7).bg(GH_GREEN).text_color("#ffffff").text_size(13).font_semibold()
+          .cursor_pointer().on_mouse_down("left", stop).on_click(openRuns).child(runLabel))
       // GitHub's green "Review changes" / "Finish your review", with the pending count; the review copy draws the popover.
       .child(div().id("rv-finish-btn").flex_none().px(12).h(30).flex().items_center().gap(6).rounded(7).bg(GH_GREEN).text_color("#ffffff").text_size(13).font_semibold()
         .cursor_pointer().on_mouse_down("left", stop).on_click(() => run("pr-review.finish"))
         .child(pending ? "Finish your review" : "Review changes")
         .when(pending > 0, (e) => e.child(div().px(6).rounded_full().bg("#ffffff").text_color(GH_GREEN).text_size(11.5).child(String(pending))))
         .child("▾"));
+  },
+
+  // Row 2, at the top of the review: the facts as plain text with separators (risk, effort, checks), then the model as
+  // one dropdown, Values, help and ⋯ (Mark done, Copy link, Open on GitHub). Narrow: it wraps.
+  metaRow(t) {
+    const ai = this.ai, m = model(), checks = this.prSel ? this.checksNow() : [], ok = checks.filter((c) => c.ok === true).length, bad = checks.filter((c) => c.ok === false).length;
+    const sep = () => div().flex_none().text_color(t.dim).child("·"), cap = (x) => x[0].toUpperCase() + x.slice(1);
+    const link = (id, child, click) => h_flex().id(id).flex_none().gap(4).items_center().px(4).h(22).rounded(5).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(click).child(child);
+    const menu = (id, items, w = 230) => (_e, cx) => { openOverlay({ mod: "pr-review", props: { part: "cmenu", key: id, items }, kind: "popup", width: w, height: 12 + 30 * items.length }); cx.stop_propagation(); };
+    const facts = [
+      ai?.mergeRisk && div().id("rv-mr").flex_none().tooltip(ai.mergeRisk.why || "").child(h_flex().gap(4).child("Merge risk:").child(div().text_color(t[SEVERITY_COLOR[ai.mergeRisk.level]] ?? t.muted).child(cap(ai.mergeRisk.level)))),
+      ai?.effort && div().id("rv-ef").flex_none().tooltip(ai.effort.why || "").child(`Review effort ${ai.effort.score}/5`),
+      ok + bad > 0 && link("rv-ck", h_flex().gap(4).child("Pre-merge checks").child(div().text_color(t.ansi2).child(`✓${ok}`)).child(div().text_color(bad ? t.ansi1 : t.muted).child(`✗${bad}`)),
+        (_e, cx) => { this.tab = "steps"; this.page = "overview"; cx.notify(); }),
+    ].filter(Boolean);
+    const modelText = this.aiBusy ? `${MODELS[this.aiBusy.model]?.label} analyzing…` : `${MODELS[m].label}${ai?.cost != null && ai.model === m ? ` · $${Number(ai.cost).toFixed(2)}` : ""}`;
+    return h_flex().id("rv-meta").flex_none().flex_wrap().min_h(28).px(14).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome).text_size(12).text_color(t.muted)
+      .children(facts.flatMap((f, k) => (k ? [sep(), f] : [f])))
+      .child(div().flex_1())
+      .child(this.showChips(t, "rv-show")).child(sep())
+      .when(Boolean(this.worktree?.path) && !this.trustedPr(), (e) => e.child(link("rv-trust", div().text_color(t.ansi3).child("Restricted Mode · Trust"), (_e, cx) => this.trust("pr", cx))
+        .tooltip("Someone else's code: language servers don't run anything from the repository, so go-to-definition may find less. Click to trust this PR.")))
+      .child(link("rv-model", h_flex().gap(4).child(this.aiBusy ? div().child(SPIN[0]).frames(SPIN, 90) : div()).child(modelText).child("▾"),
+        menu("models", Object.entries(MODELS).map(([k, v]) => [`${k === m ? "✓ " : ""}${v.label} · ${this.estimate(k)}`, false, `model:${k}`]), 280)))
+      .child(sep())
+      .child(link("rv-values", div().text_color(valuesOn() ? t.foreground : t.muted).child(`Values ${valuesOn() ? "on" : "off"}`), () => setShared("review.values", !valuesOn())))
+      .child(link("rv-keys", div().child("?"), () => openOverlay({ mod: "pr-review", props: { part: "keys" }, kind: "popup", ...KEYS_POP })).tooltip("Keyboard shortcuts"))
+      .child(link("rv-more", div().child("⋯"), menu("more", [["Explore a topic…", false, "explore"], ["Mark done", false, "done"], ["Copy link", false, "copy-link"], ...(this.prSel?.url?.startsWith("https://github.com") ? [["Open on GitHub", false, "open-gh"]] : [])])));
   },
 
   // ---- render: the left column
@@ -1385,6 +2029,10 @@ export const ReviewMode = {
           .child(div().flex_1().min_w(0).child(TextView.markdown(`rv-q-${stepKey(s)}-${k}`, this.asked(s, q))))))))
       .when(on && s.visuals?.length > 0, (e) => e.child(div().pl(26).child(this.diagramsBar(t, `rv-dia-${i}`, "Refresh this view"))).child(div().pl(26).child(visualsCard(s.visuals, t, `rv-vis-${i}`, (at, cx) => this.jumpTo(at, cx),
         this.visTab?.[i] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [i]: k }; cx.notify(); }))))
+      .when(on && !s.pseudo && Boolean(this.ai), (e) => e.child(h_flex().pl(26).gap(6).child(pill(`rv-ask-l${i}`, t, "Ask about this layer", (_e, cx) => {
+        const k = (this.ai?.steps ?? []).indexOf(s); this.setDrawer("open", cx, k >= 0 ? { layer: k } : null); cx.stop_propagation(); }))
+        .child(pill(`rv-drill-l${i}`, t, "Show details", (_e, cx) => { this.showDetails(this.layerSubject(s), `layer:${stepKey(s)}`, cx); cx.stop_propagation(); })))
+        .child(div().pl(26).child(this.drillPanel(t, `layer:${stepKey(s)}`))))
       .when(on, (e) => e.children((s.flows ?? []).map((f, k) => {
         const picked = this.flowOf()?.f === f;
         return div().pl(26).child(div().rounded(9).border_1().border_color(picked ? t.accent : t.chrome).child(flowCard(f, t, `rv-flow-${i}-${k}`,
@@ -1472,11 +2120,12 @@ export const ReviewMode = {
           .child(h_flex().gap(10).items_center().child(run(`Analyze with ${MODELS[m].label}`))
             .child(div().text_size(12).text_color(t.muted).child(this.estimate(m))))))
         .when(Boolean(this.aiBusy), (e) => e.child(h_flex().gap(8).items_center().text_size(13).text_color(t.muted).child(div().child(SPIN[0]).frames(SPIN, 90))
-          .child(div().flex_1().child(`${MODELS[this.aiBusy.model]?.label} is reading ${this.aiBusy.incremental ? "the new changes" : "the code"} · ${clock(Date.now() - this.aiBusy.started)} · cap $${CAP[this.aiBusy.model]}`))
+          .child(div().flex_1().child(`${MODELS[this.aiBusy.model]?.label} is reading ${this.aiBusy.incremental ? "the new changes" : "the code"}${this.aiBusy.passes ? ` · Pass ${this.aiBusy.pass} of ${this.aiBusy.passes}` : ""} · ${clock(Date.now() - this.aiBusy.started)} · cap $${CAP[this.aiBusy.model]}`))
           .child(pill("rv-cancel", t, "Cancel", (_e, cx) => this.cancelAi(cx), false, t.ansi1))))
         .when(Boolean(this.aiError), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(this.aiError)))
         .when(Boolean(ai && !ai.exact), (e) => e.child(div().text_size(12.5).text_color(t.ansi3).whitespace_normal().child(canInc ? "Analysis of an older diff: re-analyze, or analyze only the new changes." : "Analysis of an older diff: re-analyze for the current state.")))
-        .when(Boolean(ai?.cut.length), (e) => e.child(div().text_size(12.5).text_color(t.ansi3).whitespace_normal().child(`${ai.cut.length} hunks were too large for ${MODELS[ai.model]?.label ?? ai.model} and are not analyzed (layer "Not analyzed").`)))
+        .when(Boolean(ai?.scope), (e) => e.child(div().text_size(12.5).text_color(t.muted).whitespace_normal().child(scopeLine(ai.scope))))
+        .when(Boolean(ai?.cut.length) && !ai?.scope, (e) => e.child(div().text_size(12.5).text_color(t.ansi3).whitespace_normal().child(`${ai.cut.length} hunks were too large for ${MODELS[ai.model]?.label ?? ai.model} and are not analyzed (an older analysis: re-analyze to read them).`)))
         .child(h_flex().flex_wrap().gap(6).items_center().text_size(12.5)
           .child(h_flex().gap(2).p(2).rounded(7).border_1().border_color(t.border).children([["reading", "Layers"], ["risk", "By risk"]].map(([k, label]) =>
             div().id(`rv-order-${k}`).px(8).h(22).flex().items_center().rounded(5).cursor_pointer().bg(this.order === k ? t.selected : t.chrome)
@@ -1551,6 +2200,7 @@ export const ReviewMode = {
         .when(Boolean(pr.state), (e) => e.child(badge(t, pr.state === "open" ? "Open" : pr.state, t[{ open: "ansi2", draft: "dim", merged: "ansi5", closed: "ansi1" }[pr.state]] ?? t.dim))))
       .when(Boolean(ai?.mergeRisk || ai?.effort), (e) => e.child(this.riskBadges(t, ai, "rv-ob")))
       .when(Boolean(this.since), (e) => e.child(div().rounded(8).overflow_hidden().border_1().border_color(t.border).child(this.sinceBanner(t))))
+      .when(!ai && !this.aiBusy, (e) => e.child(this.startCards(t)))
       .child(h_flex().gap(12)
         .child(statCard(t, "rv-st-layers", "Layers", ai ? `${layers.length} ${layers.length === 1 ? "layer" : "layers"}` : "—",
           segBar(t, layers.map((s, k) => ({ weight: 1, color: t[hues[k % hues.length]] }))), layers.map((s) => plain(s.title)).join(" · ") || "Not analyzed yet"))
@@ -1616,9 +2266,9 @@ export const ReviewMode = {
   // hover (a lighter focus) for the architecture ("arch") or blast radius ("blast") page.
   archOpts(k) {
     const set = (name, v, cx) => { if (this[name] !== v) { this[name] = v; cx.notify(); } };
-    return { hl: this[`${k}Hl`], focus: this[`${k}Focus`] ?? null, hover: this[`${k}Hover`] ?? null,
+    return { hl: this[`${k}Hl`] ?? (k === "arch" ? this.askHl : null), focus: this[`${k}Focus`] ?? null, hover: this[`${k}Hover`] ?? null,
       onHl: (v, cx) => set(`${k}Hl`, v, cx), onHover: (v, cx) => set(`${k}Hover`, v, cx),
-      onFocus: (v, cx) => { this.fh.focus(); set(`${k}Focus`, v, cx); }, onJump: (at, cx) => this.jumpTo(at, cx) };
+      onFocus: (v, cx) => { this.fh.focus(); set(`${k}Focus`, v, cx); if (k === "arch" && v && this.drawerState() !== "open") this.setDrawer("open", cx); }, onJump: (at, cx) => this.jumpTo(at, cx) };
   },
 
   archPage(t) {
@@ -1628,20 +2278,499 @@ export const ReviewMode = {
     const more = () => visualsCard(this.ai.visuals, t, "rv-arch-vis", (at, cx) => this.jumpTo(at, cx), this.archVisTab ?? 0, (k, cx) => { this.archVisTab = k; cx.notify(); });
     if (!a) return v_flex().gap(12).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams")).child(div().text_size(13.5).text_color(t.muted).child(this.ai ? "This analysis has no architecture picture (older analysis, or the PR touches no architecture). Re-analyze for one." : "No analysis yet: Analyze in the left column."))
       .when(this.ai?.visuals?.length > 0, (e) => e.child(div().max_w(760).child(more())));
-    const groups = new Set(a.nodes.map((n) => n.group)).size, L = archModel(a, this.archMode);
+    const groups = new Set(a.nodes.map((n) => n.group)).size, L = this.archL(), fit = this.archFitOn();
     const opts = this.archOpts("arch");
+    // The canvas scrolls sideways by itself (archWheel, a bar under it, drag to pan): clipped at its own box, 40 px of
+    // room after the last column.
+    const viewW = this.archViewW ?? 800, contentW = L.width + 4 + 40, maxX = Math.max(0, contentW - viewW), x = Math.min(this.archX ?? 0, maxX);
+    this.archGeom = { maxX, contentW, viewW };
     return v_flex().gap(12)
-      .child(h_flex().gap(12).items_center().flex_wrap().child(div().text_size(20).font_semibold().child("Architecture impact")).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams")))
+      .child(h_flex().gap(12).items_center().flex_wrap().child(div().text_size(20).font_semibold().child("Architecture impact")).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams"))
+        .when(this.drawerState() !== "open", (e) => e.child(pill("rv-ask-open", t, "Ask", (_e, cx) => this.setDrawer("open", cx, null))))
+        .when(Boolean(this.archFocus), (e) => { const n = a.nodes.find((x) => x.id === this.archFocus); return n ? e.child(pill("rv-drill-arch", t, `Show details: ${n.label ?? n.id}`,
+          (_e, cx) => this.showDetails({ id: n.id, label: n.label ?? n.id, group: (a.groups ?? []).find((g) => g.id === n.group)?.label, at: n.at ?? n.evidence, kind: "node", description: n.description }, "arch", cx), false, t.foreground)) : e; }))
       .child(h_flex().w_full().gap(12).items_center().flex_wrap() // wraps onto two rows when narrow
         .child(div().flex_none().text_size(13).text_color(t.muted).child(`${groups} ${groups === 1 ? "system" : "systems"} | ${(a.edges ?? []).length} edges`))
         .child(div().flex_none().child(legend(t)))
         .when(hasSources(a) || (this.ai.visuals ?? []).some(hasSources), (e) => e.child(div().flex_none().child(sourceLegend(t))))
-        .child(h_flex().flex_none().gap(2).p(2).rounded(7).border_1().border_color(t.border).child(seg("diff", "Structural diff")).child(seg("before", "Before")).child(seg("after", "After"))))
-      .child(div().id("rv-arch-scroll").w_full().overflow_x_scroll().pb(8)
-        .child(archView(L, t, "rv-arch", (n, _e, cx) => this.jumpTo(n.at, cx), null, opts)))
+        .child(h_flex().flex_none().gap(2).p(2).rounded(7).border_1().border_color(t.border).child(seg("diff", "Structural diff")).child(seg("before", "Before")).child(seg("after", "After")))
+        .child(div().id("rv-av-fit").flex_none().px(10).h(28).flex().items_center().rounded(7).border_1().border_color(fit ? t.accent : t.border).cursor_pointer().text_size(12.5)
+          .text_color(fit ? t.foreground : t.muted).tooltip("Narrow cards, so a wide picture fits the view").on_click((_e, cx) => { this.archFit = !fit; this.archX = 0; cx.notify(); }).child("Fit")))
+      .child(div().id("rv-arch-canvas").w_full().h(L.height + 4).relative().overflow_hidden().when(maxX > 0, (e) => e.cursor_grab())
+        .on_size_change((size, cx) => { if (Math.abs((this.archViewW ?? 0) - size.width) > 2) { this.archViewW = size.width; cx.notify(); } })
+        .on_scroll_wheel((e, cx) => this.archWheel(e, cx))
+        .on_mouse_down("left", (e) => { if (maxX > 0) this.archPan = { x0: e.position.x, from: x }; })
+        .child(div().absolute().top(0).left(-x).w(contentW).h(L.height + 4).child(archView(L, t, "rv-arch", (n, _e, cx) => this.jumpTo(n.at, cx), null, opts)).children(this.pinNotes(t, L))))
+      .when(maxX > 0, (e) => e.child(div().id("rv-arch-hbar").w_full().h(10).relative().rounded(5).bg(t.raised)
+        .child(div().id("rv-arch-thumb").absolute().top(1).left(Math.round((x / contentW) * viewW)).w(Math.max(30, Math.round((viewW * viewW) / contentW))).h(8).rounded(4).bg(t.muted).cursor_pointer()
+          .on_mouse_down("left", (ev, cx) => { this.archThumb = { x0: ev.position.x, from: x }; cx.stop_propagation(); }))))
+      .child(this.drillPanel(t, "arch"))
       .child(archLegend(L, t, "rv-arch-edges", "Edges", opts))
       .when(this.ai?.visuals?.length > 0, (e) => e.child(div().pt(6).text_size(13).font_semibold().text_color(t.muted).child("More views"))
         .child(div().max_w(760).child(more())));
+  },
+
+  // The picture shown: its layout with normal or narrow cards (Fit), memoized like stack.js archModel.
+  archFitOn() {
+    if (this.archFit !== undefined) return this.archFit;
+    const a = this.ai?.arch;
+    return Boolean(a) && archModel(a, this.archMode).width > 1.3 * (this.archViewW ?? 1e9); // auto: much wider than the view
+  },
+  archL() {
+    const a = this.ai?.arch;
+    if (!a || !this.archFitOn()) return a ? archModel(a, this.archMode) : null;
+    const key = `${this.archMode}|${JSON.stringify(a)}`;
+    if (this.fitMemo?.key !== key) this.fitMemo = { key, L: archLayout(a, this.archMode, () => 0, true) };
+    return this.fitMemo.L;
+  },
+  // Wheel and trackpad over the picture: each gesture keeps the axis it starts with (mostly sideways: only the canvas
+  // moves, the page stays; mostly down: the page scrolls). A gesture ends after 150 ms without a wheel event.
+  archWheel(e, cx) {
+    const g = this.archGeom, now = Date.now(), dx = e.delta?.x ?? 0, dy = e.delta?.y ?? 0;
+    if (!g || g.maxX <= 0) return;
+    if (e.touch_phase === "started" || now - (this.wheelAt ?? 0) > 150) this.wheelAxis = null;
+    this.wheelAt = now;
+    if (!this.wheelAxis && (dx || dy)) this.wheelAxis = Math.abs(dx) > Math.abs(dy) || e.modifiers?.shift ? "x" : "y";
+    if (this.wheelAxis !== "x") return;
+    const d = dx || (e.modifiers?.shift ? dy : 0);
+    this.archX = Math.max(0, Math.min(g.maxX, (this.archX ?? 0) - d));
+    cx.stop_propagation(); cx.notify();
+  },
+
+  // The two deep looks, side by side on a fresh review: the analysis (understanding) and the code review (findings).
+  startCards(t) {
+    const m = model(), cr = this.find.runs.claude ?? {};
+    const card = (id, label, what, click, busy) => v_flex().id(id).flex_1().min_w(0).gap(6).p(12).rounded(10).border_1().border_color(t.border).bg(t.surface)
+      .child(div().id(`${id}-go`).flex_none().px(12).h(30).flex().items_center().justify_center().rounded(8).text_size(13).font_semibold().bg(busy ? t.raised : t.solid)
+        .text_color(busy ? t.muted : t.solid_foreground).cursor_pointer().on_click(click).child(busy ? `${label}…` : label))
+      .child(div().text_size(12.5).text_color(t.muted).whitespace_normal().child(what));
+    return h_flex().gap(12).items_start()
+      .child(card("rv-start-ai", `Analyze with ${MODELS[m].label}`, `Understand the change: layers in reading order, pictures, sample values and a walkthrough. ${this.estimate(m)}.`, (_e, cx) => this.loadAi(cx, "run"), Boolean(this.aiBusy)))
+      .child(card("rv-start-cr", "Run Claude code review", "Find problems: bugs and risks as findings on their lines, each with Fix and Verify.", (_e, cx) => this.runReviewer("claude", cx), Boolean(cr.busy)));
+  },
+
+  // ---- Ask about this (review.py main_ask, "Review: architecture question"): a question on the picture, a node or a
+  // layer; the answer lights its nodes and edges (the focus mechanism) and links its evidence. One thread per PR.
+
+  deepKey() { return this.exMode ? (this.ex?.id ? `explore:${this.ex.id}` : null) : this.prSel?.url ?? null; },
+  // What a question is about: on the Architecture page the focused card (else the whole picture); else what was picked
+  // to ask about (a layer), else the selected lines in the diff.
+  askFocus() {
+    if (this.tab === "steps" && this.page === "arch") return this.archFocus ? { node: this.archFocus } : null;
+    if (this.askAbout) return this.askAbout;
+    const a = this.fsel && this.selAnchor();
+    return a ? { range: { file: this.fsel.path, start: a.start, end: a.end, old: a.old } } : null;
+  },
+  askLabel(scope) {
+    return scope.kind === "node" ? scope.node.label ?? scope.node.id : scope.kind === "layer" ? plain(scope.layer.title) : scope.kind === "range" ? rangeLabel(scope.range) : "the architecture";
+  },
+
+  // ---- Show details (review.py main_drill, "Review: drill down"): a card or a layer from the inside, a sub-diagram
+  // inline under the picture with a breadcrumb; its cards open further. Cached per node path and diff head (deep.json).
+
+  layerSubject(s) {
+    const files = this.filesOf ? this.filesOf(s) : [];
+    return { id: `layer:${stepKey(s)}`, label: plain(s.title), kind: "layer", why: plain(s.why), text: s.text, files, evidence: s.evidence ?? [], hunks: s.hunks };
+  },
+  drillCacheKey(stack) { return drillKey(this.deepKey(), this.headNow?.() ?? this.head ?? "", stack); },
+  drillResult(stack) { return this.deep.drills?.[this.drillCacheKey(stack)] ?? null; },
+  showDetails(item, from, cx, force = false) {
+    const stack = drillPush(this.drill?.from === from ? this.drill.stack : [], item);
+    this.drill = { from, stack };
+    if (force || !this.drillResult(stack)) this.runDrill(cx);
+    cx.notify();
+  },
+  runDrill(cx) {
+    const d = this.drill, ai = this.ai, key = this.deepKey();
+    if (!d || !ai || this.drillBusy) return;
+    const top = d.stack.at(-1), ck = this.drillCacheKey(d.stack), root = d.from === "arch" ? "Architecture" : plain(d.stack[0]?.label ?? "Layer");
+    const subject = { ...top, parent: d.stack.length > 1 ? d.stack.at(-2).label : null };
+    const scope = top.kind === "node" ? scopeOf(ai, { node: top.id }) : top.kind === "layer" ? { kind: "layer", layer: { title: top.label, why: top.why, text: top.text, visuals: [], evidence: top.evidence } }
+      : { kind: "node", node: { id: top.id, label: top.label, evidence: top.at ?? null }, edges: [] };
+    const files = [...new Set([...(top.files ?? []), ...scopeFiles(scope)])];
+    const req = { drill: { label: top.label, path: crumbs(d.stack, root).map((c) => c.label), subject }, model: model(), context: this.ctxReq(), root: this.lspRoot(), explore: Boolean(ai.explore),
+      analysis: { title: ai.title, summary: ai.summary, layers: ai.steps.filter((x) => !x.pseudo).map((x) => ({ title: plain(x.title), why: plain(x.why) })) },
+      picture: pictureOf(ai.arch), scope, hunks: hunksFor(files, this.exMode ? [] : this.hunks, top.hunks ?? []) };
+    this.drillBusy = ck; this.drillErr = null;
+    cx.spawn(async (cx) => {
+      const r = await exec("python3", [`${appHome()}/mods/pr-review/review.py`, JSON.stringify(req)], { timeout: 600000 }).catch((e) => ({ code: 1, stderr: String(e) }));
+      this.drillBusy = null;
+      if (this.deepKey() !== key) return;
+      if (r.code !== 0) { this.drillErr = `Could not show details: ${(r.stderr || r.stdout).trim().slice(0, 200)}`; return cx.notify(); }
+      const out = JSON.parse(r.stdout);
+      this.updateDeep(cx, (doc) => ({ ...doc, drills: cachePut(doc.drills, ck, { ...mapDrill(out.answer), cost: out.cost }) }));
+      cx.notify();
+    });
+  },
+  // The sub-diagram under the picture (or the layer): breadcrumb (click a level to go back), the summary, the picture
+  // with sample values, its cards to open further, Refresh and ✕.
+  drillPanel(t, from) {
+    const d = this.drill;
+    if (!d || d.from !== from || !d.stack.length) return div();
+    const res = this.drillResult(d.stack), ck = this.drillCacheKey(d.stack), root = from === "arch" ? "Architecture" : "Layer", top = d.stack.at(-1);
+    const crumb = (c, k) => div().id(`rv-crumb-${k}`).flex_none().text_size(12.5).text_color(c.depth === null ? t.muted : k === crumbs(d.stack, root).length - 1 ? t.foreground : t.accent)
+      .when(c.depth !== null && k < crumbs(d.stack, root).length - 1, (e) => e.cursor_pointer().on_click((_e, cx) => { this.drill = c.depth === 0 ? null : { from, stack: drillTo(d.stack, c.depth) }; cx.notify(); }))
+      .child(c.label);
+    return v_flex().id(`rv-drill-${from}`).gap(8).p(12).rounded(10).border_1().border_color(t.border).bg(t.surface)
+      .child(h_flex().flex_wrap().gap(6).items_center()
+        .children(crumbs(d.stack, root).flatMap((c, k) => (k ? [div().text_color(t.dim).text_size(12).child("›"), crumb(c, k)] : [crumb(c, k)])))
+        .child(div().flex_1())
+        .child(this.drillBusy === ck ? h_flex().gap(6).text_size(12).text_color(t.muted).child(div().child(SPIN[0]).frames(SPIN, 90)).child("Reading the code…")
+          : pill(`rv-drill-re-${from}`, t, "↻ Refresh", (_e, cx) => { this.runDrill(cx); cx.notify(); }))
+        .child(pill(`rv-drill-x-${from}`, t, "✕", (_e, cx) => { this.drill = null; cx.notify(); })))
+      .when(Boolean(this.drillErr), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(this.drillErr)))
+      .when(!res && this.drillBusy !== ck && !this.drillErr, (e) => e.child(div().text_size(12.5).text_color(t.muted).child(`One ${MODELS[model()].label} call opens up ${top.label}.`)))
+      .when(Boolean(res), (e) => e.child(div().text_size(13).line_height(1.5).whitespace_normal().child(res.summary))
+        .child(visualCard(res.visual, t, `rv-drill-v-${from}`, (at, cx) => this.jumpTo(at, cx)))
+        .when(res.visual.nodes.length > 0, (x) => x.child(h_flex().flex_wrap().gap(4).items_center().child(div().text_size(12).text_color(t.muted).child("Open further:"))
+          .children(res.visual.nodes.map((n) => pill(`rv-drill-n-${from}-${n.id}`, t, n.label, (_e, cx) => this.showDetails({ id: `${top.id}/${n.id}`, label: n.label, at: n.at, kind: "sub", note: n.note }, from, cx)))))));
+  },
+
+  // ---- Explore: a topic walked through in existing code (explore.py, "Explore: walkthrough"), shown like an analysis
+  // without a diff: Overview, Layers, Architecture; Files lists the places it cites (the read-only file view, with
+  // go-to-definition). Ask and Show details work as for a PR. Explorations are kept per repo and topic (the newest 20).
+
+  async loadExploreIndex(cx) {
+    const doc = JSON.parse(await readTextFile(`${exploreDir()}/index.json`).catch(() => null) ?? "[]");
+    this.exIndex = Array.isArray(doc) ? doc : []; cx.notify();
+  },
+  // The repo a new exploration starts in: the one chosen, else the active space's (its git root).
+  async exploreRoot(dir) {
+    const r = dir ? await exec("git", ["-C", dir, "rev-parse", "--show-toplevel"]).catch(() => null) : null;
+    const root = r?.code === 0 ? r.stdout.trim() : dir;
+    const remote = root ? await exec("git", ["-C", root, "remote", "get-url", "origin"]).catch(() => null) : null;
+    const repo = repoOfRemote(remote?.code === 0 ? remote.stdout : ""); // only a github.com remote names a repo
+    return { root, repo };
+  },
+  // Your own repos are trusted (a github.com repo whose owner is your gh login, or a repo or folder you trusted); a
+  // folder without a github.com remote starts in Restricted Mode, as PRs by someone else do.
+  exploreTrusted(ex = this.ex) {
+    return exploreTrust({ repo: ex?.repo ?? null, root: ex?.root ?? null, login: shared("gh.login"), trustedRepos: shared("pr-review.trustedRepos") ?? [], trustedRoots: shared("pr-review.trustedRoots") ?? [] });
+  },
+  applyExploreTrust() { if (this.ex?.root) setTrusted(this.ex.root, this.exploreTrusted()); },
+  enterExplore(ex, cx) {
+    if (!this.exMode) { this.prAiSaved = this.ai; this.exMode = true; }
+    this.exStart = ex; this.ai = this.exAi ?? null;
+    if (!this.exIndex) { this.exIndex = []; cx.timer.after(0, (cx) => this.loadExploreIndex(cx)); }
+    if (ex.start && !this.exRoot) {
+      cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+        const dir = ex.root ?? spaces().find((x) => x.id === ex.space)?.folder ?? spaces().find((x) => x.active)?.folder ?? null;
+        this.exRoot = await this.exploreRoot(dir); cx.notify();
+      }));
+    }
+  },
+  leaveExplore() { if (this.exMode) { this.exMode = false; this.ai = this.prAiSaved ?? null; this.defFile = null; this.drill = null; } },
+  chooseExploreRepo(cx) {
+    cx.spawn(async (cx) => { const dir = await pickFolder({ prompt: "Repository to explore" }); if (dir) { this.exRoot = await this.exploreRoot(dir); cx.notify(); } });
+  },
+  runExplore(cx) {
+    const topic = this.exTopic.value().trim(), r = this.exRoot, m = model();
+    if (!topic || !r?.root || this.exBusy) return;
+    const id = exploreId(r.root, topic), out = `${exploreDir()}/${id}.json`, status = `${out}.status`;
+    const ctx = C.spaceContext(ctxDoc(), this.exStart?.space ?? focused()?.space);
+    const req = { root: r.root, repo: r.repo, topic, model: m, context: this.ctxReq(ctx), out, status };
+    this.exBusy = { id, topic, model: m, started: Date.now(), status, out, ctx }; this.exErr = null;
+    cx.spawn(async (cx) => {
+      await exec("mkdir", ["-p", exploreDir()]).catch(() => null);
+      const reqFile = `${out}.req.json`, before = await readTextFile(reqFile).catch(() => null);
+      await writeTextFile(reqFile, JSON.stringify(req), before).catch(() => null);
+      await exec("sh", ["-c", 'nohup python3 "$0" "$1" >/dev/null 2>&1 &', `${appHome()}/mods/pr-review/explore.py`, `@${reqFile}`]).catch((e) => { this.exErr = String(e); this.exBusy = null; });
+      this.pollExplore(cx); cx.notify();
+    });
+    cx.notify();
+  },
+  pollExplore(cx) {
+    cx.timer.after(5000, (cx) => cx.spawn(async (cx) => {
+      const b = this.exBusy;
+      if (!b) return;
+      const st = JSON.parse(await readTextFile(b.status).catch(() => null) ?? "null");
+      if (!st || st.busy) { cx.notify(); return this.pollExplore(cx); }
+      this.exBusy = null;
+      if (st.error) { this.exErr = st.error; return cx.notify(); }
+      const entry = { id: b.id, topic: b.topic, root: this.exRoot.root, repo: this.exRoot.repo, model: b.model, ctx: b.ctx, at: Date.now() };
+      const before = await readTextFile(`${exploreDir()}/index.json`).catch(() => null), next = exploreIndex(before ? JSON.parse(before) : [], entry);
+      await writeTextFile(`${exploreDir()}/index.json`, JSON.stringify(next.list, null, 1), before).catch(() => null);
+      for (const old of next.dropped) exec("rm", ["-f", `${exploreDir()}/${old}.json`, `${exploreDir()}/${old}.json.status`, `${exploreDir()}/${old}.json.req.json`]).catch(() => null);
+      this.exIndex = next.list;
+      this.openExploration(b.id, cx);
+    }));
+  },
+  openExploration(id, cx) {
+    cx.spawn(async (cx) => {
+      const text = await readTextFile(`${exploreDir()}/${id}.json`).catch(() => null);
+      if (!text) { this.exErr = "That exploration is gone"; return cx.notify(); }
+      const entry = (this.exIndex ?? []).find((x) => x.id === id) ?? {};
+      this.exAi = exploreAi(JSON.parse(text));
+      this.ex = { id, root: this.exAi.root, repo: this.exAi.repo, topic: this.exAi.topic, ctx: entry.ctx ?? null };
+      this.ai = this.exAi; this.page = "overview"; this.tab = "steps"; this.defFile = null; this.drill = null; this.archFocus = null;
+      this.applyExploreTrust();
+      setShared("review.explore", { id, topic: this.ex.topic, repo: this.ex.repo, root: this.ex.root, at: Date.now() });
+      cx.notify();
+    });
+  },
+  // A cited file in the read-only view at a line (go-to-definition works there: the repo is local).
+  openExploreFile(path, line, cx) {
+    const root = this.ex?.root;
+    if (!root || !path) return;
+    cx.spawn(async (cx) => {
+      const text = await readTextFile(`${root}/${path}`).catch(() => null);
+      if (text === null) { this.note = `Could not open ${path}`; return cx.notify(); }
+      const all = text.replace(/\n$/, "").split("\n"), from = Math.max(0, line - 3000), lines = all.slice(from, from + 6000).map(expandTabs);
+      this.defFile = { path, line, from, lines, spans: highlightLines(lines, langOf(path), `explore:${root}:${path}:${from}`) };
+      this.lists.def.scroll_to_item(Math.max(0, line - from - 6), "top");
+      cx.notify();
+    });
+  },
+
+  // The bar in Explore: back, the topic, the repo, Restricted Mode, a new topic.
+  renderExploreBar(ex) {
+    const t = theme(), title = ex.topic ? `Explore: ${ex.topic}` : "Explore a topic", trusted = this.exploreTrusted(ex);
+    return h_flex().id("rv-bar").size_full().pl(84).pr(14).gap(10).items_center().bg(t.chrome).text_color(t.foreground).text_size(13.5)
+      .child(pill("rv-back", t, "← Back", () => { setShared("review.explore", null); if (!shared("review.target")) leave(); }).flex_none())
+      .child(div().id("rv-title").flex_1().min_w(0).truncate().font_semibold().text_size(14).tooltip(title).child(title))
+      .when(Boolean(ex.repo), (e) => e.child(div().flex_none().text_size(12).text_color(t.muted).child(ex.repo)))
+      .when(Boolean(ex.id) && !trusted, (e) => e.child(div().id("rv-ex-trust-wrap").flex_none().tooltip("Restricted Mode: language servers run nothing from this code, so go-to-definition may find less. Trust it only if it is yours.")
+        .child(pill("rv-ex-trust", t, ex.repo ? `Restricted Mode · Trust ${ex.repo}` : "Restricted Mode · Trust folder", () => run("pr-review.trust-repo"), false, t.ansi3))))
+      .when(Boolean(ex.id), (e) => e.child(pill("rv-ex-new", t, "New topic", () => setShared("review.explore", { start: true, root: ex.root, at: Date.now() })).flex_none()));
+  },
+
+  renderExplore(cx, ex, root) {
+    const t = theme();
+    if (!ex.id || ex.start) return root.child(this.exploreStart(t));
+    if (!this.exAi || this.ex?.id !== ex.id) { if (this.exOpening !== ex.id) { this.exOpening = ex.id; cx.timer.after(0, (cx) => this.openExploration(ex.id, cx)); } return root.child(div().p(20).text_color(t.muted).child("Opening…")); }
+    const ai = this.exAi, files = ai.files ?? [], tab = this.tab === "files" ? "files" : "steps";
+    const tabBtn = (id, label) => div().id(`rv-tab-${id}`).flex_1().h(32).flex().items_center().justify_center().rounded(7).text_size(13.5).cursor_pointer()
+      .bg(tab === id ? t.selected : t.chrome).text_color(tab === id ? t.foreground : t.muted).on_click((_e, cx) => { this.tab = id; cx.notify(); }).child(label);
+    const nav = (k, label) => h_flex().id(`rv-exnav-${k}`).flex_none().h(30).px(10).items_center().rounded(7).cursor_pointer().when(this.page === k, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.page = k; this.defFile = null; cx.notify(); }).child(div().text_size(13.5).font_semibold().text_color(this.page === k ? t.foreground : t.muted).child(label));
+    const left = tab === "files"
+      ? v_flex().id("rv-exfiles").flex_1().min_h(0).overflow_y_scroll().p(8).gap(2).child(div().px(6).pb(4).text_size(12).text_color(t.muted).child(`${files.length} files the walkthrough cites`))
+        .children(files.map((f) => h_flex().id(`rv-exf-${f.path}`).gap(8).px(8).h(28).items_center().rounded(6).cursor_pointer().when(this.defFile?.path === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.openExploreFile(f.path, f.lines[0] ?? 1, cx))
+          .child(div().flex_1().min_w(0).truncate().text_size(13).child(f.path)).child(div().flex_none().text_size(11.5).text_color(t.muted).child(f.lines.slice(0, 3).map((l) => `:${l}`).join(" ")))))
+      : v_flex().id("rv-exlayers").flex_1().min_h(0).overflow_y_scroll().p(8).gap(4)
+        .child(nav("overview", "Overview")).child(nav("arch", "Architecture"))
+        .child(div().pt(8).px(10).text_size(11.5).font_semibold().text_color(t.muted).child("LAYERS"))
+        .children(ai.steps.map((s, i) => v_flex().id(`rv-exl-${i}`).px(10).py(8).gap(2).rounded(8).cursor_pointer().when(this.page === `layer:${i}`, (e) => e.bg(t.selected)).hover((x) => x.bg(t.hover))
+          .on_click((_e, cx) => { this.page = `layer:${i}`; this.cur = i; this.defFile = null; cx.notify(); })
+          .child(h_flex().gap(8).child(div().w(18).flex_none().text_color(t.muted).child(String(i + 1))).child(div().flex_1().min_w(0).truncate().text_size(14).font_semibold().child(plain(s.title))))
+          .child(div().pl(26).text_size(12.5).text_color(t.muted).truncate().child(plain(s.why)))));
+    const page = this.defFile ? this.defView(t) : div().flex_1().min_h(0).relative()
+      .child(v_flex().id(`rv-expage-${this.page}`).absolute().inset_0().overflow_y_scroll().px(24).py(18).gap(14)
+        .child(this.page === "arch" ? this.archPage(t) : this.page?.startsWith("layer:") ? this.exploreLayer(t, Number(this.page.slice(6))) : this.exploreOverview(t)))
+      .child(Scrollbar.vertical(`rv-expage-${this.page}`).absolute().inset_0());
+    return root
+      .child(h_flex().flex_1().min_h(0)
+        .child(v_flex().w(this.leftW()).flex_none().h_full().bg(t.chrome)
+          .child(h_flex().flex_none().p(8).gap(6).border_b(1).border_color(t.border).child(tabBtn("files", `Files · ${files.length}`)).child(tabBtn("steps", `Layers · ${ai.steps.length}`)))
+          .child(left))
+        .child(this.splitter(t))
+        .child(v_flex().flex_1().min_w(0).h_full().relative()
+          .child(div().id("rv-probe").absolute().top(-100).font_family(settings().font_family ?? "JetBrains Mono").text_size(13).whitespace_nowrap()
+            .on_size_change((size, cx) => { const w = size.width / PROBE.length; if (w > 0 && Math.abs((this.charW ?? 0) - w) > 0.01) { this.charW = w; cx.notify(); } }).child(PROBE))
+          .child(page)
+          .when(Boolean(this.note), (e) => e.child(div().flex_none().px(14).py(8).border_t(1).border_color(t.border).text_size(12.5).text_color(t.muted).child(this.note)))
+          .when(this.drawerState() === "open", (e) => e.child(div().absolute().top(0).right(0).bottom(0).child(this.askDrawer(t))))
+          .when(this.drawerState() === "collapsed", (e) => e.child(div().absolute().top(0).right(0).bottom(0).child(this.drawerStrip(t))))));
+  },
+
+  exploreOverview(t) {
+    const ai = this.exAi;
+    return v_flex().gap(14).max_w(1000)
+      .child(div().text_size(12).text_color(t.muted).child(`${MODELS[ai.model]?.label ?? ai.model ?? ""}${ai.cost != null ? ` · $${Number(ai.cost).toFixed(3)}` : ""}${ai.budget ? ` of $${ai.budget} cap` : ""} · ${ago(ai.generated)} · ${ai.repo ?? ai.root}`))
+      .child(div().text_size(22).font_semibold().line_height(1.3).whitespace_normal().child(ai.title || ai.topic))
+      .child(div().text_size(14).line_height(1.5).whitespace_normal().child(TextView.markdown(`rv-exs-${ai.generated}`, ai.summary || "")))
+      .child(h_flex().gap(8).child(pill("rv-ex-ask", t, "Ask about this", (_e, cx) => this.setDrawer("open", cx, null))).child(pill("rv-ex-arch", t, "Architecture", (_e, cx) => { this.page = "arch"; cx.notify(); })))
+      .when(ai.intent?.length > 0, (e) => e.child(v_flex().gap(4).child(div().text_size(12).font_semibold().text_color(t.muted).child("QUESTION")).child(this.statements(t, ai.intent, "rv-exq"))))
+      .when(ai.behaviorPoints?.length > 0, (e) => e.child(v_flex().gap(4).child(div().text_size(12).font_semibold().text_color(t.muted).child("HOW IT WORKS")).child(this.statements(t, ai.behaviorPoints, "rv-exh"))))
+      .child(v_flex().gap(4).child(div().text_size(12).font_semibold().text_color(t.muted).child("LAYERS, IN READING ORDER"))
+        .children(ai.steps.map((s, i) => h_flex().id(`rv-exo-${i}`).gap(8).p(6).rounded(6).cursor_pointer().hover((x) => x.bg(t.hover)).on_click((_e, cx) => { this.page = `layer:${i}`; cx.notify(); })
+          .child(div().w(18).flex_none().text_color(t.muted).child(String(i + 1))).child(div().flex_1().min_w(0).whitespace_normal().text_size(13.5).child(`${plain(s.title)}: ${plain(s.why)}`)))));
+  },
+
+  exploreLayer(t, i) {
+    const s = this.exAi.steps[i];
+    if (!s) return div();
+    return v_flex().gap(12).max_w(1000)
+      .child(div().text_size(20).font_semibold().whitespace_normal().child(`${i + 1}. ${plain(s.title)}`))
+      .child(div().text_size(14).text_color(t.muted).whitespace_normal().child(plain(s.why)))
+      .child(div().text_size(14).line_height(1.5).child(TextView.markdown(`rv-exl-${this.exAi.generated}-${i}`, s.text || "")))
+      .when((s.evidence ?? []).length > 0, (e) => e.child(h_flex().flex_wrap().gap(6).children(s.evidence.map((ev, k) => pill(`rv-exev-${i}-${k}`, t, `${ev.split("/").pop()} ↗`, (_e, cx) => this.jumpTo(ev, cx))))))
+      .child(h_flex().gap(6).child(pill(`rv-exask-${i}`, t, "Ask about this layer", (_e, cx) => this.setDrawer("open", cx, { layer: this.exAi.steps.indexOf(s) })))
+        .child(pill(`rv-exdrill-${i}`, t, "Show details", (_e, cx) => this.showDetails({ id: `layer:${i}`, label: plain(s.title), kind: "layer", why: plain(s.why), text: s.text, files: (s.evidence ?? []).map(pathOf), evidence: s.evidence ?? [] }, `exlayer:${i}`, cx))))
+      .child(this.drillPanel(t, `exlayer:${i}`))
+      .when(s.visuals?.length > 0, (e) => e.child(div().max_w(760).child(visualsCard(s.visuals, t, `rv-exvis-${i}`, (at, cx) => this.jumpTo(at, cx), this.visTab?.[`x${i}`] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [`x${i}`]: k }; cx.notify(); }))))
+      .children((s.flows ?? []).map((f, k) => div().max_w(760).child(flowCard(f, t, `rv-exflow-${i}-${k}`, (_e, cx) => { this.jumpTo(f.at, cx); cx.stop_propagation(); }))));
+  },
+
+  // Start: the repo (the active space's, or any folder), the topic, the model with its cap, the explorations so far.
+  exploreStart(t) {
+    const r = this.exRoot, m = model(), busy = this.exBusy;
+    return v_flex().id("rv-exstart").flex_1().min_h(0).overflow_y_scroll().items_center().py(40)
+      .child(v_flex().w(640).gap(14)
+        .child(div().text_size(22).font_semibold().child("Explore a topic"))
+        .child(div().text_size(13.5).text_color(t.muted).whitespace_normal().child("For code you don't know: ask how something works and get a walkthrough of the existing code, like a PR analysis without a diff: the question, how it works, layers in reading order, the architecture, pictures and sample values, each with file:line."))
+        .child(h_flex().gap(8).items_center().text_size(13)
+          .child(div().flex_none().text_color(t.muted).child("Repository"))
+          .child(div().flex_1().min_w(0).truncate().font_semibold().child(r?.root ? `${r.repo ?? r.root.split("/").pop()} · ${r.root.replace(home(), "~")}` : "Finding the active space's repo…"))
+          .child(pill("rv-ex-pick", t, "Choose folder…", (_e, cx) => this.chooseExploreRepo(cx))))
+        .child(div().id("rv-ex-topic").h(36).px(10).flex().items_center().rounded(8).border_1().border_color(t.accent).bg(t.background).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.exTopic).h_full().text_size(14).text_color(t.foreground)))
+        .child(h_flex().gap(10).items_center()
+          .child(modelPills(t, "rv-ex-m"))
+          .child(div().text_size(12).text_color(t.muted).child(`cap $${CAP[m]}`))
+          .child(div().flex_1())
+          .child(div().id("rv-ex-go").px(14).h(32).flex().items_center().rounded(8).text_size(13.5).font_semibold().bg(busy ? t.raised : t.solid).text_color(busy ? t.muted : t.solid_foreground)
+            .cursor_pointer().on_click((_e, cx) => this.runExplore(cx)).child(busy ? "Exploring…" : "Explore")))
+        .when(Boolean(busy), (e) => e.child(h_flex().gap(8).items_center().text_size(13).text_color(t.muted).child(div().child(SPIN[0]).frames(SPIN, 90))
+          .child(`${MODELS[busy.model]?.label} is reading the code · ${clock(Date.now() - busy.started)} · cap $${CAP[busy.model]}`)))
+        .when(Boolean(this.exErr), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(this.exErr)))
+        .when((this.exIndex ?? []).length > 0, (e) => e.child(div().pt(10).text_size(11.5).font_semibold().text_color(t.muted).child(`EXPLORATIONS · ${this.exIndex.length}`))
+          .children(this.exIndex.map((x) => h_flex().id(`rv-exi-${x.id}`).gap(8).px(8).h(32).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.openExploration(x.id, cx))
+            .child(div().flex_1().min_w(0).truncate().text_size(13.5).child(x.topic))
+            .child(div().flex_none().text_size(12).text_color(t.muted).child(`${x.repo ?? String(x.root).split("/").pop()} · ${ago(new Date(x.at).toISOString())}`))))));
+  },
+
+  // ---- the Ask drawer, one for every view: open (380 px at the right), folded to a 28 px strip, or closed; kept per
+  // review. Over the Architecture page it lies on top (the picture keeps its width); beside the diff it squeezes the
+  // diff when there is room (from 1100 px), else it lies on top too.
+  drawerState() { return this.deep.drawer?.[this.deepKey()] ?? null; },
+  setDrawer(state, cx, about) {
+    const key = this.deepKey();
+    if (about !== undefined) this.askAbout = about;
+    if (state === "open") { this.askUnseen = false; cx.timer.after(0, () => this.askIn.focus()); }
+    this.updateDeep(cx, (d) => ({ ...d, drawer: { ...d.drawer, [key]: state } }));
+    cx.notify();
+  },
+  drawerSqueezes() { return this.drawerState() === "open" && !(this.tab === "steps" && this.page) && (this.winW ?? 0) - this.leftW() - SPLIT >= 1100; },
+
+  askNow(cx) {
+    const q = this.askIn.value().trim(), ai = this.ai, key = this.deepKey();
+    if (!ai && q) { this.askErr = "Analyze first: answers build on the analysis"; return cx.notify(); }
+    if (!q || !ai || !key || this.askBusy) return;
+    const scope = scopeOf(ai, this.askFocus()), layer = scope.kind === "layer" ? this.ai.steps.find((s) => plain(s.title) === plain(scope.layer.title)) : null;
+    const req = { ask: q, model: model(), context: this.ctxReq(), root: this.lspRoot(), explore: Boolean(ai.explore),
+      analysis: { title: ai.title, summary: ai.summary, layers: ai.steps.filter((s) => !s.pseudo).map((s) => ({ title: plain(s.title), why: plain(s.why) })) },
+      picture: pictureOf(ai.arch), scope, hunks: hunksFor(scopeFiles(scope), this.exMode ? [] : this.hunks, layer?.hunks ?? []), history: history(threadOf(this.deep.threads, key)) };
+    const about = this.askLabel(scope);
+    this.askBusy = { q, label: about, started: Date.now() }; this.askErr = null;
+    cx.spawn(async (cx) => {
+      const r = await exec("python3", [`${appHome()}/mods/pr-review/review.py`, JSON.stringify(req)], { timeout: 600000 }).catch((e) => ({ code: 1, stderr: String(e) }));
+      this.askBusy = null;
+      if (this.deepKey() !== key) return;
+      if (r.code !== 0) { this.askErr = `Could not ask: ${(r.stderr || r.stdout).trim().slice(0, 200)}`; return cx.notify(); }
+      const out = JSON.parse(r.stdout), a = mapAnswer(out.answer, ai.arch);
+      this.askIn.set_value("");
+      const sc = scope.kind === "node" ? { kind: "node", node: { id: scope.node.id } } : scope.kind === "range" ? scope : { kind: scope.kind };
+      this.updateDeep(cx, (d) => ({ ...d, threads: threadAdd(d.threads, key, { q, about, a, scope: sc, cost: out.cost }) }));
+      if (this.drawerState() !== "open") this.askUnseen = true;
+      this.showAnswer(a);
+      cx.notify();
+    });
+    cx.notify();
+  },
+
+  // The answer's highlights on the Architecture page: its first node focused, its first edge's badge lit.
+  showAnswer(a) {
+    if (!this.ai?.arch) return;
+    const h = highlightOf(this.archL(), a);
+    if (h.focus) this.archFocus = h.focus;
+    this.askHl = h.hl;
+  },
+
+  // deep.json changed by fn, here and in the file (compare-and-swap: another copy may write it too).
+  updateDeep(cx, fn) {
+    this.deep = fn(this.deep);
+    cx.spawn(async () => {
+      await exec("mkdir", ["-p", `${appHome()}/pr-data`]).catch(() => null);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const before = await readTextFile(deepFile()).catch(() => null), doc = before ? JSON.parse(before) : {};
+        try { await writeTextFile(deepFile(), JSON.stringify(fn({ ...doc, threads: doc.threads ?? {}, drills: doc.drills ?? {}, pins: doc.pins ?? {}, drawer: doc.drawer ?? {} })), before); return; } catch { /* written meanwhile: again */ }
+      }
+    });
+  },
+
+  pins() { return pinsOf(this.deep.pins, this.deepKey()); },
+  pin(turn, cx) { const key = this.deepKey(); this.updateDeep(cx, (d) => ({ ...d, pins: pinAdd(d.pins, key, turn) })); },
+  unpin(id, cx) { const key = this.deepKey(); this.updateDeep(cx, (d) => ({ ...d, pins: pinDrop(d.pins, key, id) })); },
+  // A code note: still on a line of the diff, else outdated (kept, shown in the drawer).
+  pinOutdated(pin) { const a = pin.anchor; return Boolean(a?.file) && !this.rowsFor(a.file, true).some((r) => atLine(r, a.end, a.old)); },
+  // A note (pinned answer) as a turn into a pending comment: the usual flow from there (pending, preview).
+  noteToComment(pin, cx) {
+    const a = pin.anchor, rows = a?.file ? this.rowsFor(a.file, true) : [], i = rows.findIndex((r) => atLine(r, a.end, a.old));
+    if (i < 0) { this.note = "Not turned into a comment: its lines are no longer in the diff"; return cx.notify(); }
+    const anchor = selection(rows, Math.max(0, rows.findIndex((r) => atLine(r, a.start, a.old))), i);
+    this.comments = [...this.comments, { id: Date.now().toString(36), file: a.file, ...anchor, text: pin.text }]; this.persist(cx);
+    this.note = "The note is a pending comment now: it goes out with your review"; cx.notify();
+  },
+
+  // The strip a folded drawer leaves: "Ask" down the edge, a dot when an answer came in meanwhile.
+  drawerStrip(t) {
+    return v_flex().id("rv-drawer-strip").w(28).h_full().flex_none().items_center().pt(12).gap(2).border_l(1).border_color(t.border).bg(t.chrome).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setDrawer("open", cx))
+      .children(["A", "s", "k"].map((c) => div().text_size(12).font_semibold().text_color(t.muted).child(c)))
+      .when(Boolean(this.askUnseen || this.askBusy), (e) => e.child(div().mt(6).w(8).h(8).rounded_full().bg(this.askBusy ? t.ansi3 : t.accent)));
+  },
+
+  // The drawer: what it is about, the input, the notes pinned in this review, the thread (newest first).
+  askDrawer(t) {
+    const ai = this.ai, scope = scopeOf(ai, this.askFocus()), turns = threadOf(this.deep.threads, this.deepKey()).slice().reverse(), id = "rv-drawer";
+    const pins = this.pins(), pinned = new Set(pins.map((p) => p.id));
+    const chipBtn = (cid, label, color, click) => div().id(cid).flex_none().px(6).py(1).rounded(5).border_1().border_color(color).text_size(11.5).text_color(color)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { click(cx); cx.stop_propagation(); cx.notify(); }).child(label);
+    const name = new Map((ai?.arch?.nodes ?? []).map((n) => [n.id, n.label ?? n.id])), edges = pictureOf(ai?.arch).edges;
+    const L = ai?.arch ? this.archL() : null, off = new Set(pinsOn(pins, L).off.map((p) => p.id));
+    const answer = (tu, k) => v_flex().id(`${id}-t${k}`).gap(6).pt(8).border_t(1).border_color(t.border)
+      .child(h_flex().gap(6).items_start().child(div().flex_1().min_w(0).text_size(13).font_semibold().whitespace_normal().child(tu.q))
+        .child(div().flex_none().max_w(130).truncate().text_size(11).text_color(t.muted).child(tu.about ?? "")))
+      .child(div().text_size(13).line_height(1.5).child(TextView.markdown(`${id}-a${tu.at}`, tu.a.text || "–")))
+      .when((tu.a.highlights.nodes.length + tu.a.highlights.edges.length) > 0, (e) => e.child(h_flex().flex_wrap().gap(4)
+        .children(tu.a.highlights.nodes.map((n) => chipBtn(`${id}-hn${k}-${n}`, name.get(n) ?? n, t.accent, () => { this.page = "arch"; this.tab = "steps"; this.archFocus = n; })))
+        .children(tu.a.highlights.edges.map((x) => { const e = edges.find((y) => y.id === x); return chipBtn(`${id}-he${k}-${x}`, e ? `${name.get(e.from) ?? e.from} → ${name.get(e.to) ?? e.to}` : x, t.accent,
+          () => { this.page = "arch"; this.tab = "steps"; this.archFocus = null; this.askHl = highlightOf(this.archL(), { highlights: { nodes: [], edges: [x] } }).hl; }); }))))
+      .when(tu.a.evidence.length > 0, (e) => e.child(v_flex().gap(2).children(tu.a.evidence.map((ev, j) => h_flex().id(`${id}-ev${k}-${j}`).gap(6).text_size(12).cursor_pointer()
+        .on_click((_e, cx) => { this.jumpTo(ev.at, cx); cx.stop_propagation(); })
+        .child(div().flex_none().text_color(t.accent).child(`${ev.at.split("/").pop()} ↗`)).child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(ev.why))))))
+      .child(h_flex().gap(6).child(pinned.has(`p${tu.at}`) ? chipBtn(`${id}-unpin${k}`, "Pinned · unpin", t.ansi5, (cx) => this.unpin(`p${tu.at}`, cx))
+        : pinAnchor(tu) ? chipBtn(`${id}-pin${k}`, tu.scope?.kind === "range" ? "Pin to the code" : "Pin to diagram", t.muted, (cx) => this.pin(tu, cx)) : div()));
+    const note = (p) => v_flex().id(`${id}-pin-${p.id}`).gap(3).p(8).rounded(6).border_l(3).border_color(t.ansi5).bg(t.ansi5 + "12")
+      .child(h_flex().gap(6).items_center().text_size(11.5)
+        .child(div().flex_none().font_semibold().text_color(t.ansi5).child("Note · private"))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(p.anchor.file ? rangeLabel(p.anchor) : name.get(p.anchor.node) ?? p.anchor.node ?? p.anchor.edge))
+        .when(off.has(p.id) || this.pinOutdated(p), (e) => e.child(badge(t, off.has(p.id) ? "unattached" : "outdated", t.ansi3)))
+        .child(chipBtn(`${id}-pinx-${p.id}`, "✕", t.muted, (cx) => this.unpin(p.id, cx))))
+      .child(div().text_size(12.5).line_height(1.45).whitespace_normal().child(p.summary))
+      .when(Boolean(p.anchor.file), (e) => e.child(h_flex().child(chipBtn(`${id}-pinc-${p.id}`, "Turn into comment", t.foreground, (cx) => this.noteToComment(p, cx)))));
+    return v_flex().id(id).w(380).h_full().flex_none().border_l(1).border_color(t.border).bg(t.surface).shadow_lg()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(v_flex().flex_none().p(10).gap(8).border_b(1).border_color(t.border)
+        .child(h_flex().gap(6).items_center().child(div().flex_1().min_w(0).truncate().text_size(13.5).font_semibold().child(`Ask about ${this.askLabel(scope)}`))
+          .child(pill(`${id}-fold`, t, "›", (_e, cx) => this.setDrawer("collapsed", cx)).tooltip("Fold to the edge"))
+          .child(pill(`${id}-x`, t, "✕", (_e, cx) => this.setDrawer(null, cx)).tooltip("Close (Esc); the thread stays")))
+        .child(h_flex().gap(6).items_center()
+          .child(div().id(`${id}-in`).flex_1().min_w(0).h(30).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).bg(t.background).cursor_text()
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.askIn).h_full().text_size(13).text_color(t.foreground)))
+          .child(this.askBusy ? div().flex_none().child(SPIN[0]).frames(SPIN, 90) : pill(`${id}-go`, t, "Ask", (_e, cx) => this.askNow(cx), false, t.foreground)))
+        .child(div().text_size(11.5).text_color(t.muted).whitespace_normal().child(`One ${MODELS[model()].label} call with the analysis${this.hunks ? ", the diff" : ""} and this thread. Click a card or select lines to ask about them.`)))
+      .child(div().flex_1().min_h(0).relative()
+        .child(v_flex().id(`${id}-scroll`).absolute().inset_0().overflow_y_scroll().p(10).gap(8)
+          .when(Boolean(this.askBusy), (e) => e.child(div().text_size(12.5).text_color(t.muted).whitespace_normal().child(`${this.askBusy.q} · reading…`)))
+          .when(Boolean(this.askErr), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(this.askErr)))
+          .when(pins.length > 0, (e) => e.child(div().text_size(11.5).font_semibold().text_color(t.muted).child(`NOTES · ${pins.length}`)).children(pins.map(note)))
+          .when(turns.length > 0, (e) => e.child(h_flex().pt(4).items_center().child(div().flex_1().text_size(11.5).font_semibold().text_color(t.muted).child(`THREAD · ${turns.length}`))
+            .child(pill(`${id}-clear`, t, "Clear", (_e, cx) => { const key = this.deepKey(); this.updateDeep(cx, (d) => { const th = { ...d.threads }; delete th[key]; return { ...d, threads: th }; }); this.askHl = null; cx.notify(); }))))
+          .children(turns.map((tu, k) => answer(tu, k))))
+        .child(Scrollbar.vertical(`${id}-scroll`).absolute().inset_0()));
+  },
+
+  // Pinned answers on the picture: a note on the card or edge they are about (click: the drawer; ✕: unpin).
+  pinNotes(t, L) {
+    return pinsOn(this.pins(), L).on.map(({ pin, x, y, w }) => h_flex().id(`rv-pn-${pin.id}`).absolute().left(x).top(y).max_w(w).h(18).px(6).gap(4).items_center().rounded(9)
+      .border_1().border_color(t.ansi5).bg(t.background).text_size(10.5).text_color(t.foreground).cursor_pointer().tooltip(pin.text.slice(0, 600))
+      .on_click((_e, cx) => { this.setDrawer("open", cx); cx.stop_propagation(); })
+      .child(div().flex_none().text_color(t.ansi5).child("✎")).child(div().min_w(0).truncate().child(`${pin.summary}${pin.evidence ? ` · ${pin.evidence.split("/").pop()}` : ""}`))
+      .child(div().id(`rv-pnx-${pin.id}`).flex_none().text_color(t.muted).hover((s) => s.text_color(t.foreground)).child("✕").on_click((_e, cx) => { this.unpin(pin.id, cx); cx.stop_propagation(); })));
   },
 
   blastPage(t) {
@@ -1769,9 +2898,13 @@ export const ReviewMode = {
         .when(Boolean(this.find.status[x.id]?.verify), (e) => { const v = this.find.status[x.id].verify; return e.child(div().text_size(12).whitespace_normal()
           .text_color(t[{ fixed: "ansi2", not_fixed: "ansi1" }[v.result] ?? "ansi3"]).child(`Verified ${String(v.head).slice(0, 7)}: ${v.result.replace("_", " ")} — ${v.reason}`)); })
         .child(h_flex().flex_wrap().gap(6)
-          .child(pill(`rv-fcm-${x.id}`, t, "Comment", (_e, cx) => this.findingComment(x, cx)))
+          .child(pill(`rv-fcm-${x.id}`, t, "Add as comment", (_e, cx) => this.findingComment(x, cx)))
           .child(pill(`rv-fdi-${x.id}`, t, "Discuss in chat", (_e, cx) => this.discuss(x, cx)))
-          .child(pill(`rv-ffx-${x.id}`, t, "Fix", (_e, cx) => this.fix([x], cx), false, t.foreground))
+          .children((() => { const fv = this.fixView(this.fixOf(x.id)); return !fv ? [pill(`rv-ffx-${x.id}`, t, "Fix…", (_e, cx) => this.fix([x], cx), false, t.foreground)]
+            : [badge(t, fv.commit ? `Fix ready on ${fv.job.branch ?? "the PR"}` : `Fixing · ${fv.status}`, fv.commit ? t.ansi2 : t.ansi3),
+              ...(fv.job.terminal ? [pill(`rv-fgo-${x.id}`, t, "Go to fix", () => this.goFix(fv.job))] : []),
+              ...(fv.commit && fv.job.target === "sub" ? [pill(`rv-fap-${x.id}`, t, "Apply to PR", (_e, cx) => this.applyFix(fv.job, cx), false, t.ansi2)] : []),
+              ...(fv.job.target === "sub" ? [pill(`rv-fdc-${x.id}`, t, "Discard fix", (_e, cx) => this.discardFix(fv.job, cx))] : [])]; })())
           .child(pill(`rv-fdm-${x.id}`, t, "Dismiss", (_e, cx) => this.setFinding(x, "dismissed", cx))));
     };
     const sevs = ["high", "medium", "low"].map((k) => [k, all.filter((x) => x.severity === k && OPEN_ST.includes(this.fstatus(x))).length]).filter(([, n]) => n);
@@ -1786,8 +2919,10 @@ export const ReviewMode = {
         .child(h_flex().flex_wrap().gap(4).children([["open", "Open"], ["fixed", "Fixed"], ["dismissed", "Dismissed"], ["all", "All"]].map(([v, label]) =>
           chip("status", v, label, v === "all" ? all.length : v === "open" ? count((x) => ["open", "progress", "recheck"].includes(this.fstatus(x))) : count((x) => this.fstatus(x) === v)))))
         .child(h_flex().gap(8).items_center()
-          .child(div().flex_1().text_size(12).text_color(t.muted).child(Object.values(runs).some((r) => r.busy) ? "A reviewer is running…" : all.length ? `${shown.length} shown` : "No findings yet: run a reviewer from Reviews ▾ in the top bar."))
+          .child(div().flex_1().text_size(12).text_color(t.muted).child(Object.values(runs).some((r) => r.busy) ? "A reviewer is running…" : all.length ? `${shown.length} shown` : "No findings yet. Run a reviewer:"))
           .when(open.length > 0, (e) => e.child(pill("rv-fixall", t, `Fix ${open.length} open (shown)`, (_e, cx) => this.fix(open, cx), false, t.foreground)))))
+      .when(!all.length, (e) => e.child(h_flex().flex_none().flex_wrap().px(14).py(8).gap(6).border_b(1).border_color(t.border)
+        .children(reviewersNow().map(([k, [label]]) => pill(`rv-frun-${k}`, t, runs[k]?.busy ? `${label} running…` : label, (_e, cx) => this.runReviewer(k, cx), false, t.foreground)))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("rv-find-left").absolute().inset_0().overflow_y_scroll().p(8).gap(6)
           .children(inDiff.map(card))
@@ -1836,7 +2971,11 @@ export const ReviewMode = {
     if (it.t === "row") return it.src[it.ri].kind === "@" ? 30 : ROW;
     if (it.t === "step") return 66 + 24 * it.s.questions.length;
     if (it.t === "sug") return 44 + 21 * this.lines(it.s.reason);
-    if (it.t === "comment") return 44 + 21 * this.lines(it.c.text);
+    if (it.t === "pad") return 60;
+    if (it.t === "hidden") return 24;
+    if (it.t === "ch") return this.cardOf(it).folded ? 28 + 2 * CARD_GAP : CARD_HEAD;
+    if (it.t === "cb") { const c = this.cardOf(it), w = this.cardW(c); return 12 + 20 * this.cardLines(c.text, w) + c.replies.reduce((n, r) => n + 26 + 19 * Math.min(8, this.cardLines(r.text, w - 22)), 0) + (it.k === "th" ? 0 : CARD_GAP); }
+    if (it.t === "cr") return CARD_REPLY + CARD_GAP;
     if (it.t === "gh") return 44 + 21 * Math.min(6, this.lines(it.g.body));
     if (it.t === "compose") return COMPOSE;
     if (it.t === "composeact") return ACT + 4;
@@ -1860,7 +2999,8 @@ export const ReviewMode = {
       const num = (n) => div().w(48).h_full().flex_none().pr(8).flex().items_center().justify_end().text_color(t.muted).child(n === undefined ? "" : String(n));
       return mono(h_flex()).h(ROW).w_full().text_size(13).cursor_pointer()
         .when(Boolean(tone), (e) => e.bg(tint(r.kind) + "1a")).when(on, (e) => e.bg(t.selection))
-        .child(div().w(4).h_full().flex_none().when(on, (e) => e.bg(t.accent)).when(!on && Boolean(focus), (e) => e.bg(t.accent + "55")))
+        .child(div().w(4).h_full().flex_none().when(on, (e) => e.bg(t.accent)).when(!on && Boolean(focus), (e) => e.bg(t.accent + "55"))
+          .when(!on && !focus && Boolean(this.pinMarks?.has(`${it.path}:${r.n}`)), (e) => e.bg(t.ansi5)))
         .child(h_flex().h_full().flex_none().relative().when(Boolean(tone), (e) => e.bg(tint(r.kind) + "40")).child(num(r.o)).child(num(r.n))
           // GitHub's "+" on hover: the line numbers are the comment button (onItem: x inside the gutter).
           .child(h_flex().absolute().inset_0().justify_end().items_center().text_color("#00000000").hover((s) => s.text_color(t.accent_foreground).bg(t.accent + "26"))
@@ -1868,7 +3008,12 @@ export const ReviewMode = {
         .child(div().w(22).flex_none().text_center().font_semibold().text_color(tone ?? t.muted).child(r.kind === " " ? "" : r.kind === "-" ? "−" : "+"))
         .child(div().flex_1().min_w(0).pr(12).truncate().text_color(t.foreground).child(this.code(r, it)))
         .when(Boolean(this.traces?.get(`${it.path}:${r.n}`)) && r.kind !== "-", (e) => e.child(div().flex_none().max_w(460).mr(12).px(8).h(18).flex().items_center()
-          .rounded(9).bg(t.accent + "1f").italic().text_size(12).text_color(t.muted).truncate().child(this.traces.get(`${it.path}:${r.n}`))));
+          .rounded(9).bg(t.accent + "1f").italic().text_size(12).text_color(t.muted).truncate().child(this.traces.get(`${it.path}:${r.n}`))))
+        // The selection's last row: "+ Comment (c)" at its right end (onItem places the click by x, rowClick).
+        .when(on && !this.composing && this.fsel?.b === lineKey(r), (e) => e.child(div().w(ASK_W).h(18).mr(8).flex_none().flex().items_center().justify_center()
+          .rounded(9).border_1().border_color(t.accent).text_size(12).text_color(t.accent).child("Ask")))
+        .when(on && !this.composing && this.fsel?.b === lineKey(r), (e) => e.child(div().w(CHIP_W).h(18).mr(12).flex_none().flex().items_center().justify_center()
+          .rounded(9).bg(t.accent).text_size(12).font_semibold().text_color(t.accent_foreground).child("+ Comment (c)")));
     }
     if (it.t === "gap") {
       const h = it.r.hidden, seg = (label) => div().w(GAP_SEG).flex_none().child(label);
@@ -1893,7 +3038,7 @@ export const ReviewMode = {
       const card = (e) => e.border_l(4).border_r(1).border_color(c).bg(c + "12");
       if (it.t === "fact") {
         return div().w_full().h(ACT).pl(GUTTER).pr(16).pb(6).child(card(h_flex()).size_full().px(12).gap(BTN_GAP).items_center().border_b(1)
-          .child(button(t, "Comment", t.border, t.foreground)).child(button(t, "Discuss in chat", t.border, t.foreground))
+          .child(button(t, "Add as comment", t.border, t.foreground)).child(button(t, "Discuss in chat", t.border, t.foreground))
           .child(button(t, "Fix", c, t.foreground)).child(button(t, "Dismiss", t.border, t.muted)));
       }
       return div().w_full().h(this.sizeOf(it)).pl(GUTTER).pr(16).pt(6).child(card(v_flex()).size_full().px(12).pt(8).gap(4).border_t(1).text_size(13.5)
@@ -1901,21 +3046,9 @@ export const ReviewMode = {
           .child(div().text_size(12).text_color(t[FSTATUS[st]?.[1]] ?? t.muted).child(FSTATUS[st]?.[0] ?? st)))
         .child(div().flex_1().min_h(0).overflow_hidden().line_height(1.55).whitespace_normal().child(`${f.title}. ${plain(f.detail)}`)));
     }
-    if (it.t === "comment" || it.t === "cact") {
-      const c = it.c, at = Number.parseInt(c.id, 36), time = Number.isFinite(at) ? new Date(at).toTimeString().slice(0, 5) : "";
-      const card = (e) => e.border_l(4).border_r(1).border_color(t.border).bg(t.surface);
-      if (it.t === "cact") {
-        return div().w_full().h(ACT).pl(GUTTER).pr(16).pb(6).child(card(h_flex()).size_full().px(12).gap(BTN_GAP).items_center().border_b(1)
-          .child(button(t, "Edit", t.border, t.foreground)).child(button(t, "Delete", t.border, t.ansi1)));
-      }
-      const out = this.routeNow() === "github" && !inDiff(this.diffLines ?? new Map(), c);
-      return div().w_full().h(this.sizeOf(it)).pl(GUTTER).pr(16).pt(6).child(card(v_flex()).size_full().px(12).pt(8).gap(6).border_t(1).text_size(13.5)
-        .child(h_flex().h(18).gap(8).items_center().text_size(12)
-          .child(div().font_semibold().text_color(t.foreground).child("You")).child(badge(t, "Pending", t.ansi3))
-          .when(out, (e) => e.child(badge(t, "not in the diff: goes into the review body", t.muted)))
-          .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(`${time}${c.from === "ki" ? " · from AI suggestion" : ""}${it.loose ? ` · ${uiLine(c)}, not shown` : ""}`)))
-        .child(div().flex_1().min_h(0).overflow_hidden().line_height(1.55).whitespace_normal().text_color(t.foreground).child(c.text)));
-    }
+    if (it.t === "ch" || it.t === "cb" || it.t === "cr") return this.cardRow(it, t);
+    if (it.t === "pad") return div().w_full().h(60);
+    if (it.t === "hidden") return div().w_full().h(24).pl(GUTTER + 4).flex().items_center().text_size(11.5).italic().text_color(t.muted).child(it.text);
     if (it.t === "gh") {
       const g = it.g;
       return div().w_full().h(this.sizeOf(it)).pl(GUTTER).pr(16).pt(6).child(v_flex().size_full().px(12).pt(8).gap(6).border_l(4).border_r(1).border_t(1).border_b(1)
@@ -1926,7 +3059,8 @@ export const ReviewMode = {
     }
     if (it.t === "compose") {
       const c = this.editing, a = c ?? this.selAnchor(), out = Boolean(a) && this.routeNow() === "github" && !inDiff(this.diffLines ?? new Map(), { file: this.fsel?.path, ...a });
-      const now = this.routeNow() === "github" ? "Add single comment posts to GitHub now" : "Add single comment sends it to the agent now";
+      const now = this.routeNow() === "github" ? (shared("review.hintPostNow") ? "Post now: one comment to GitHub at once" : "Tip: Post now to GitHub posts this one comment at once; Start a review collects them for one review")
+        : "Send to agent…: shows what goes to the agent first";
       return div().w_full().h(COMPOSE).pl(GUTTER).pr(16).pt(6).child(v_flex().size_full().px(12).pt(8).pb(4).gap(6).border_l(4).border_r(1).border_t(1)
         .border_color(t.accent).bg(t.surface).rounded_tl(4).rounded_tr(4)
         .child(h_flex().h(18).gap(8).items_center().text_size(12)
@@ -1992,8 +3126,28 @@ export const ReviewMode = {
     return h_flex().overflow_hidden().children(renderLine(div, m?.shown[it.ri]?.text ?? r.text, m?.spans[it.ri] ?? [], this.syn));
   },
 
+  // The left column's width: while dragging the pointer's, else the kept one (default 560, 340 to 65% of the window).
+  leftW() { return leftWidth(this.dragW ?? shared("review.leftWidth"), this.winW); },
+  // The 6 px divider between the column and the diff: drag to resize, double-click for the default width.
+  splitter(t) {
+    return h_flex().id("rv-split").w(SPLIT).h_full().flex_none().justify_center().cursor_col_resize().bg(this.drag ? t.accent + "33" : t.chrome).hover((s) => s.bg(t.accent + "33"))
+      .on_mouse_down("left", (_e, cx) => { this.drag = true; cx.stop_propagation(); cx.notify(); })
+      .on_click((e, cx) => { if (e.click_count === 2) { this.drag = false; this.dragW = null; setShared("review.leftWidth", null); cx.notify(); } })
+      .child(div().w(1).h_full().bg(this.drag ? t.accent : t.border));
+  },
+
   renderReview(cx) {
-    const t = theme(), target = shared("review.target") ?? null;
+    const t = theme(), target = shared("review.target") ?? null, ex = shared("review.explore");
+    if (ex) {
+      if (this.exStart !== ex) { if (ex.start && this.exStart?.at !== ex.at) this.exRoot = null; this.enterExplore(ex, cx); }
+      const root = v_flex().id("rv-root").size_full().bg(t.background).text_color(t.foreground).text_size(13.5)
+        .on_size_change((size, cx) => { if (Math.abs((this.winW ?? 0) - size.width) > 8) { this.winW = size.width; cx.notify(); } })
+        .on_mouse_move((e, cx) => { if (this.drag) { this.dragW = leftWidth(e.local_position?.x ?? e.position.x, this.winW); cx.notify(); } const g = this.archGeom, p = this.archPan ?? this.archThumb; if (g && p) { const d = e.position.x - p.x0; this.archX = Math.max(0, Math.min(g.maxX, this.archThumb ? p.from + (d * g.contentW) / g.viewW : p.from - d)); cx.notify(); } })
+        .on_mouse_up("left", (_e, cx) => { this.archPan = null; this.archThumb = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
+        .track_focus(this.fh).on_key_down((e, cx) => this.onReviewKey(e, cx));
+      return this.renderExplore(cx, ex, root);
+    }
+    this.leaveExplore();
     if (target?.url !== this.prSel?.url) { this.prSel = target; this.resetReview(); }
     // After a refresh for the previous target ended; queued, since refresh() notifies and render may not.
     if (!this.refreshQueued && this.prSel && this.key() !== this.context) {
@@ -2001,9 +3155,20 @@ export const ReviewMode = {
       cx.timer.after(0, (cx) => { this.refreshQueued = false; this.refresh(cx); });
     }
     if (this.hunks && model() !== this.aiModel && !this.aiBusy) this.loadAi(cx, "cache");
+    if (this.winW) this.listW = this.winW - this.leftW() - SPLIT - (this.drawerSqueezes() ? 380 : 0); // the diff column's width: card heights wrap to it
+    // Lines a pinned answer cites: marked in the diff's gutter (memoized on the pins).
+    if (this.pinMarksOf !== this.pins()) { this.pinMarksOf = this.pins(); this.pinMarks = new Set(this.pinMarksOf.flatMap((p) => (p.evidence ? [p.evidence.replace(/^(.*?):(\d+).*$/, "$1:$2")] : []))); }
     const other = target && !C.shown(ctxDoc(), prCtx(target), shared);
     const root = v_flex().id("rv-root").size_full().bg(t.background).text_color(t.foreground).text_size(13.5)
-      .on_size_change((size, cx) => { if (Math.abs((this.listW ?? 0) - (size.width - LEFT)) > 8) { this.listW = size.width - LEFT; cx.notify(); } })
+      .on_size_change((size, cx) => { if (Math.abs((this.winW ?? 0) - size.width) > 8) { this.winW = size.width; cx.notify(); } })
+      // Dragging the divider: the column follows the pointer; the width is kept (shared "review.leftWidth") on release.
+      // ponytail: a release outside the window keeps dragging until the next release here.
+      .on_mouse_move((e, cx) => {
+        if (this.drag) { this.dragW = leftWidth(e.local_position?.x ?? e.position.x, this.winW); cx.notify(); }
+        const g = this.archGeom, p = this.archPan ?? this.archThumb;
+        if (g && p) { const d = e.position.x - p.x0; this.archX = Math.max(0, Math.min(g.maxX, this.archThumb ? p.from + (d * g.contentW) / g.viewW : p.from - d)); cx.notify(); }
+      })
+      .on_mouse_up("left", (_e, cx) => { this.archPan = null; this.archThumb = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
       .track_focus(this.fh).on_key_down((e, cx) => this.onReviewKey(e, cx));
     if (!target || other) {
       return root.items_center().justify_center().gap(12).text_color(t.muted)
@@ -2013,6 +3178,7 @@ export const ReviewMode = {
     }
     this.traces = this.traceMap();
     const { items, at } = this.itemsOf(this.tab === "steps" ? "steps" : "files");
+    if (this.selected().length) items.push({ t: "pad" }); // room for the selection toolbar
     if (this.pendingScroll && at[this.pendingScroll] !== undefined) { this.lists[this.tab === "steps" ? "steps" : "files"].scroll_to_item(at[this.pendingScroll], "top"); this.pendingScroll = null; }
     if (this.scrollCompose && at.compose !== undefined) { this.lists[this.tab === "steps" ? "steps" : "files"].scroll_to_item(at.compose, "center"); this.scrollCompose = false; }
     this.uiChanged(cx);
@@ -2036,12 +3202,15 @@ export const ReviewMode = {
       .bg(this.tab === id ? t.selected : t.chrome).text_color(this.tab === id ? t.foreground : t.muted).when(this.tab === id, (e) => e.font_semibold()).hover((s) => s.text_color(t.foreground))
       .on_click((_e, cx) => { this.tab = id; cx.notify(); }).child(label);
     return root
+      .child(this.metaRow(t))
       .child(h_flex().flex_1().min_h(0)
-        .child(v_flex().w(LEFT).flex_none().h_full().bg(t.chrome).border_r(1).border_color(t.border)
+        .child(v_flex().w(this.leftW()).flex_none().h_full().bg(t.chrome)
           .child(h_flex().flex_none().p(8).gap(6).border_b(1).border_color(t.border)
             .child(tabBtn("files", `Files · ${this.shown().patch.length}`)).child(tabBtn("steps", `Layers${this.ai ? ` · ${this.ai.steps.filter((s) => !s.pseudo).length}` : ""}`))
+            .child(tabBtn("comments", `Comments${this.commentRowsNow().length ? ` · ${this.commentRowsNow().length}` : ""}`))
             .child(tabBtn("findings", `Findings${this.find.list.length ? ` · ${this.find.list.filter((x) => ["open", "progress", "recheck"].includes(this.fstatus(x))).length}` : ""}`)))
-          .child(this.tab === "steps" ? this.stepsPane(t) : this.tab === "findings" ? this.findingsPane(t) : this.filesPane(t)))
+          .child(this.tab === "steps" ? this.stepsPane(t) : this.tab === "findings" ? this.findingsPane(t) : this.tab === "comments" ? this.commentsPane(t) : this.filesPane(t)))
+        .child(this.splitter(t))
         .child(v_flex().flex_1().min_w(0).h_full().relative()
           .child(div().id("rv-probe").absolute().top(-100).font_family(settings().font_family ?? "JetBrains Mono").text_size(13).whitespace_nowrap()
             .on_size_change((size, cx) => { const w = size.width / PROBE.length; if (w > 0 && Math.abs((this.charW ?? 0) - w) > 0.01) { this.charW = w; cx.notify(); } }).child(PROBE))
@@ -2065,6 +3234,16 @@ export const ReviewMode = {
             .child(Scrollbar.vertical(listId).absolute().inset_0())))
           .when(Boolean(sug), (e) => e.child(div().flex_none().p(10).border_t(1).border_color(t.border).child(this.sugCard(sug, t, false))))
           .when(Boolean(this.note), (e) => e.child(div().flex_none().px(14).py(8).border_t(1).border_color(t.border).text_size(12.5).text_color(/Could not|Not sent|Not posted|Select a line/.test(this.note ?? "") ? t.ansi1 : t.muted).child(this.note)))
-          .when(this.finishOpen, (e) => e.child(this.finishPopover(t)))));
+          .when(Boolean(this.replyTo), (e) => e.child(this.replyBar(t)))
+          .when(this.selected().length > 0, (e) => e.child(this.selectionBar(t)))
+          .when(Boolean(this.applyBlocked), (e) => e.child(h_flex().flex_none().px(14).py(8).gap(8).items_center().border_t(1).border_color(t.border).bg(t.ansi3 + "1c").text_size(12.5)
+            .child(div().flex_1().whitespace_normal().child(`${this.applyBlocked.branch}: the PR's checkout isn't clean, so it can't be applied here.`))
+            .child(pill("rv-handover", t, "Hand over…", (_e, cx) => this.handOverApply(this.applyBlocked, cx), false, t.foreground))
+            .child(pill("rv-handover-x", t, "Later", (_e, cx) => { this.applyBlocked = null; cx.notify(); }))))
+          .when(this.finishOpen && !this.sendP, (e) => e.child(this.finishPopover(t)))
+          .when(Boolean(this.sendP), (e) => e.child(this.sendPopover(t)))
+          .when(!this.drawerSqueezes() && this.drawerState() === "open", (e) => e.child(div().absolute().top(0).right(0).bottom(0).child(this.askDrawer(t))))
+          .when(this.drawerState() === "collapsed", (e) => e.child(div().absolute().top(0).right(0).bottom(0).child(this.drawerStrip(t)))))
+        .when(this.drawerSqueezes(), (e) => e.child(this.askDrawer(t))));
   },
 };

@@ -157,7 +157,11 @@ const sync = {
   // The call that skips the Lambdas: a stub with its chip.
   const skip = L.paths.find((p) => p.label === "reads the config");
   assert.equal(skip.kind, "stub");
-  assert.equal(skip.chip.text, "→ Secrets vault ⑭");
+  assert.equal(skip.chip.text, `→ Secrets vault ${skip.mark}`);
+  // Numbers in reading order: by the source's column, then top to bottom.
+  const colOf = (p) => L.nodes.find((n) => n.id === p.from[0]).col;
+  assert.deepEqual(L.paths.map((p) => p.num), L.paths.map((_, k) => k + 1));
+  assert.ok(L.paths.every((p, k) => k === 0 || colOf(L.paths[k - 1]) <= colOf(p)), "numbers go column by column");
   // Fan-out: the four calls from the stages into the external services share one trunk into the group's frame.
   const fan = L.paths.filter((p) => p.from[0] === "stages" && L.nodes.find((n) => n.id === p.to).group === "ext");
   assert.equal(fan.length, 4);
@@ -194,6 +198,53 @@ const sync = {
   assert.equal(p2.segments[0].y1, row(2)); // leaves at "Rank", below
   assert.ok(sm.y + sm.stateTop + 4 * ARCH.ROW <= sm.y + sm.h - 24, "the states fit above the card's footer");
   assert.ok(archLayout({ ...arch, nodes: arch.nodes.map((n) => ({ ...n, states: undefined })) }).nodes[0].stateTop === null); // old analyses: no lane
+}
+
+// Many state rows calling a few targets: one path per target (a line from each row into one trunk), each target its
+// own channel, badges at the start of the lines next to the rows, numbered top to bottom.
+{
+  const st = (name, calls) => ({ name, type: "task", calls });
+  const arch = { groups: [{ id: "flow", label: "Step Functions" }, { id: "work", label: "Lambdas" }],
+    nodes: [{ id: "sm", group: "flow", label: "State machine intel", type: "orchestration",
+      states: [st("Validate", "read"), st("Planned"), st("Partitions", "phase"), st("Research", "phase"), st("search", "phase"), st("lockfiles", "read"), st("prs", "phase"), st("Assemble", "asm")] },
+    { id: "phase", group: "work", label: "Phase Lambdas" }, { id: "read", group: "work", label: "Read Lambdas" }, { id: "asm", group: "work", label: "Assemble" }],
+    edges: [] };
+  const L = archLayout(arch), sm = L.nodes.find((n) => n.id === "sm");
+  sane(L, "rows");
+  assert.equal(L.paths.length, 3, "one path per target");
+  const phase = L.paths.find((p) => p.to === "phase");
+  assert.equal(phase.label, "Partitions, Research, search, prs");
+  assert.equal(phase.edges.length, 4);
+  const lanes = L.paths.map((p) => p.segments.find((s) => s.x1 === s.x2)?.x1).filter((x) => x !== undefined);
+  assert.equal(new Set(lanes).size, lanes.length, "each target its own channel");
+  for (const p of L.paths) assert.ok(p.badge.x < sm.x + sm.w + 60, `badge ${p.mark} sits next to the rows, not in the channel`);
+  assert.deepEqual(L.paths.map((p) => p.to), ["read", "phase", "asm"], "numbered by their first row, top to bottom");
+}
+
+// External services called from the middle of a group that spans further right: their own column beside it, not a
+// frame stacked below with lines running down past the picture.
+{
+  const arch = { groups: [{ id: "aws", label: "AWS" }, { id: "ext", label: "External", kind: "SaaS" }],
+    nodes: [{ id: "sm", group: "aws", label: "State machine" }, { id: "phase", group: "aws", label: "Phase Lambdas" }, { id: "read", group: "aws", label: "Read Lambdas" },
+      { id: "hosted", group: "aws", label: "Lambda hosted" }, { id: "scan", group: "ext", label: "Scanner API" }, { id: "gh", group: "ext", label: "GitHub API" }, { id: "nvd", group: "ext", label: "NVD" }],
+    edges: [{ from: "sm", to: "phase", label: "a" }, { from: "sm", to: "read", label: "b" }, { from: "phase", to: "hosted", label: "c" },
+      { from: "phase", to: "scan", label: "d" }, { from: "phase", to: "gh", label: "e" }, { from: "read", to: "scan", label: "f" }, { from: "phase", to: "nvd", label: "g" }] };
+  const L = archLayout(arch), g = (id) => L.groups.find((x) => x.id === id);
+  sane(L, "external");
+  assert.ok(g("ext").x >= g("aws").x + g("aws").w, "the external services sit right of the AWS frame");
+  assert.ok(g("ext").y < g("aws").y + g("aws").h, "not stacked below it");
+  const bottom = Math.max(...L.nodes.map((n) => n.y + n.h));
+  assert.ok(L.paths.every((p) => p.segments.every((s) => Math.max(s.y1, s.y2) <= bottom + 8)), "no line runs below the picture");
+}
+
+// Fit: the same picture with narrow cards is narrower, its cards 160 px with at most two lines of description.
+{
+  const arch = { groups: [{ id: "a", label: "A" }], nodes: ["x", "y", "z"].map((id) => ({ id, group: "a", label: `Node ${id}`, description: "A long description that needs several lines in a card of any width at all, really" })),
+    edges: [{ from: "x", to: "y", label: "1" }, { from: "y", to: "z", label: "2" }] };
+  const wide = archLayout(arch), fit = archLayout(arch, "diff", () => 0, true);
+  sane(fit, "fit");
+  assert.ok(fit.width < wide.width * 0.8, "narrower");
+  assert.ok(fit.nodes.every((n) => n.w === 160 && n.descLines <= 2));
 }
 
 // The blast radius: each context file's relation is its own path (no merged lanes), titles wrap to two lines.

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -41,6 +42,7 @@ class Base(unittest.TestCase):
             "CORGI_HOME": str(self.state), "HERDR_APP_HOME": str(self.app),
             "CORGI_MANIFEST": str(self.tmp / "mods.json"), "CORGI_CHECK": "true",
             "CORGI_HERDR_VERSION": "0.1.14", "CORGI_HERDR_APP": "true",
+            "CORGI_NOW": str(time.time() + 30 * 86400),  # past the release cooldown; Cooldown sets its own
             "GIT_CONFIG_GLOBAL": str(self.tmp / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@users.noreply.github.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@users.noreply.github.com",
@@ -443,6 +445,107 @@ class B3Update(Base):
         self.assertIn("main.js", out)
         self.assertEqual((self.live("goto") / "main.js").read_text(), GOTO["main.js"])
         self.assertEqual(self.lock()["goto"]["version"], "0.1.0")
+
+
+class B3cCooldown(Base):
+    DAY = 86400
+
+    def setUp(self):
+        super().setUp()
+        self.work, self.bare = self.make_repo("goto", GOTO)
+        self.run_cli("enable", "goto", "--keys=skip")
+        self.at(1)
+
+    def at(self, days):
+        os.environ["CORGI_NOW"] = str(time.time() + days * self.DAY)
+
+    def status(self):
+        code, out = self.run_cli("status", "--json")
+        self.assertEqual(code, 0, out)
+        return json.loads(out)
+
+    def test_a_one_day_old_release_waits_at_the_default(self):
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0")
+        st = self.status()
+        self.assertEqual(st["updates"], [])
+        self.assertEqual([(p["name"], p["version"]) for p in st["pending"]], [("goto", "0.2.0")])
+        self.assertEqual(st["pending"][0]["available_on"], corgi.day(time.time() + 3 * self.DAY))
+        self.assertEqual((st["mods"]["goto"]["latest"], st["mods"]["goto"]["next"]), ("0.2.0", None))
+        code, out = self.run_cli("update", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertIn("0.2.0 is waiting until", out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.1.0")
+
+    def test_eligible_after_n_days(self):
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0")
+        self.at(4)
+        st = self.status()
+        self.assertEqual((st["updates"], st["pending"]), (["goto"], []))
+        self.run_cli("config", "set", "min-release-age", "7")
+        self.assertEqual(self.status()["updates"], [])
+        self.at(8)
+        code, out = self.run_cli("update", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.2.0")
+
+    def test_offers_the_newest_old_enough_release_and_lists_the_newer_one_as_pending(self):
+        old = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 10 * self.DAY)) + "Z"
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0", tag=False)
+        with mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": old}):  # annotated tag: its tagger date counts
+            git(self.work, "tag", "-a", "v0.2.0", "-m", "v0.2.0")
+        git(self.work, "push", "-q", "origin", "--tags")
+        self.release(self.work, "goto", {"main.js": "v3\n"}, "0.3.0")
+        st = self.status()
+        self.assertEqual((st["updates"], st["mods"]["goto"]["next"]), (["goto"], "0.2.0"))
+        self.assertEqual([p["version"] for p in st["pending"]], ["0.3.0"])
+        code, out = self.run_cli("update", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.2.0")
+
+    def test_early_updates_skip_the_wait(self):
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0")
+        self.at(0)
+        self.answers = [True]
+        code, out = self.run_cli("config", "set", "early-updates", "on")
+        self.assertEqual(code, 0, out)
+        self.assertIn("compromised release", out)
+        self.assertEqual(self.status()["pending"], [])
+        code, out = self.run_cli("update", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.2.0")
+
+    def test_explicit_version_in_its_waiting_period_needs_confirmation(self):
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0")
+        code, out = self.run_cli("update", "goto@0.2.0")  # declined
+        self.assertEqual(code, 1, out)
+        self.assertIn("warning: goto 0.2.0 is still in its 3-day waiting period", out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.1.0")
+        self.answers = [True]
+        code, out = self.run_cli("update", "goto@0.2.0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.2.0")
+        self.release(self.work, "goto", {"main.js": "v3\n"}, "0.3.0")
+        code, out = self.run_cli("update", "goto@0.3.0", "--yes")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.lock()["goto"]["version"], "0.3.0")
+
+    def test_config_round_trip(self):
+        cli = lambda *a: self.run_cli("config", *a)  # noqa: E731
+        self.assertEqual(cli("get", "min-release-age"), (0, "3\n"))
+        self.assertEqual(cli("set", "min-release-age", "7"), (0, "min-release-age 7\n"))
+        self.assertEqual(cli("get", "min-release-age"), (0, "7\n"))
+        self.assertEqual(cli("set", "min-release-age", "soon")[0], 1)
+        self.assertEqual(cli("set", "early-updates", "on")[0], 1)  # declined
+        self.assertEqual(cli("get", "early-updates"), (0, "off\n"))
+        code, out = cli("set", "early-updates", "on", "--yes")
+        self.assertIn("New releases wait 7 days", out)
+        self.assertEqual(cli("list"), (0, "min-release-age 7\nearly-updates on\n"))
+        self.assertEqual(cli("set", "colour", "red")[0], 1)
+        self.release(self.work, "goto", {"main.js": "v2\n"}, "0.2.0")
+        self.run_cli("update", "goto")  # save_state keeps the settings next to clone
+        cfg = json.loads((self.state / "config.json").read_text())
+        self.assertEqual((cfg["min_release_age_days"], cfg["early_updates"]), (7, True))
+        self.assertIn("clone", cfg)
 
 
 UTIL = GOTO["lib/util.js"]  # a..g, one per line

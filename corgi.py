@@ -86,7 +86,12 @@ def load_state():
 def save_state(installed, lock):
     save_json(state_dir() / "installed.json", installed)
     save_json(app_home() / "corgi.lock", lock)
-    save_json(state_dir() / "config.json", {"clone": str(HERE)})  # the updater mod finds the CLI here
+    save_json(state_dir() / "config.json", {**config(), "clone": str(HERE)})  # the updater mod finds the CLI here
+
+
+def config():
+    """config.json (CORGI_HOME): {clone, min_release_age_days, early_updates}."""
+    return load_json(state_dir() / "config.json", {})
 
 
 # --- files ---------------------------------------------------------------------
@@ -266,6 +271,49 @@ def latest(d, path):
     return f"{meta.get('version', '0.0.0')}+{head[:7]}"
 
 
+# --- minimum release age --------------------------------------------------------
+
+DAY = 86400
+WARNING = ("New releases wait {n} days before Corgi offers them. That gives time to spot a bad or compromised "
+           "release before it reaches your machine. Mods run with your user's permissions. Turn this on only if "
+           "you trust the authors and want fixes the day they ship.")
+
+
+def now():
+    return float(os.environ.get("CORGI_NOW") or time.time())
+
+
+def min_age_days(cfg=None):
+    cfg = config() if cfg is None else cfg
+    return 0 if cfg.get("early_updates") else int(cfg.get("min_release_age_days", 3))
+
+
+def released(d, version):
+    """When a version came out: the annotated tag's tagger date, else the commit date."""
+    ref = ref_of(version)
+    t = "" if "+" in version else git("-C", d, "for-each-ref", "--format=%(taggerdate:unix)", f"refs/tags/{ref}").strip()
+    return int(t or git("-C", d, "log", "-1", "--format=%ct", ref).strip())
+
+
+def day(ts):
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def pick(d, path, current, days):
+    """(eligible, waiting): the newest version newer than current that is at least `days` old, and the newest one
+    still in its waiting period as (version, available_on epoch). Either is None."""
+    eligible, waiting = None, None
+    for v in reversed(tags(d) or [latest(d, path)]):
+        if not newer(v, current):
+            break
+        ready = released(d, v) + days * DAY
+        if ready <= now():
+            eligible = v
+            break
+        waiting = waiting or (v, ready)
+    return eligible, waiting
+
+
 def export(repo, ref):
     """The repo's tree at ref, in a temp dir (git archive: tracked files only)."""
     p = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", ref], capture_output=True)
@@ -290,12 +338,13 @@ class Source:
     dev: str = None
 
 
-def source(name, entry, version=None, dev=None):
-    """The mod at version (default: latest tag, else the default branch head), or a dev checkout's HEAD."""
+def source(name, entry, version=None, dev=None, d=None):
+    """The mod at version (default: latest tag, else the default branch head), or a dev checkout's HEAD.
+    d: the repo, when the caller fetched it already."""
     if dev:
         root = export(dev, "HEAD")
     else:
-        d = fetch(entry["repo"])
+        d = d or fetch(entry["repo"])
         version = version or latest(d, entry["path"])
         root = export(d, ref_of(version))
     mdir = root / entry["path"]
@@ -650,8 +699,26 @@ def update_one(name, want, a, installed, lock, manifest, rollback=False):
     if rollback and pristine(name, want).is_dir():  # offline: the copy kept at install time
         p = pristine(name, want)
         src = Source(name, want, ent["repo"], p, p, load_json(p / "corgi.json", {}))
-    else:
+    elif rollback:
         src = source(name, entry_for(name, manifest, ent), want)
+    else:
+        entry, days = entry_for(name, manifest, ent), min_age_days()
+        d = fetch(entry["repo"])
+        explicit = want
+        if not want:
+            want, waiting = pick(d, entry["path"], old, days)
+            want = want or old
+            if waiting:
+                print(f"{name}: {waiting[0]} is waiting until {day(waiting[1])} (minimum release age {days} days)")
+        src = source(name, entry, want, d=d)
+        ready = released(d, src.version) + days * DAY if explicit and src.version != old else 0
+        if ready > now():
+            print(f"warning: {name} {src.version} is still in its {days}-day waiting period (offered from "
+                  f"{day(ready)}). The wait gives time to spot a bad or compromised release before it reaches "
+                  f"your machine, and mods run with your user's permissions.")
+            if not (getattr(a, "yes", False) or ask(f"Install {name} {src.version} now anyway? [y/N] ")):
+                print(f"{name}: stays on {old}")
+                return 1
     if src.version == old and not a.force:
         print(f"{name}: {old} is up to date")
         return 0
@@ -1197,21 +1264,26 @@ def cmd_status(a):
         manifest = load_manifest()
     except Fail:
         manifest = {}
-    out = {"mods": {}, "updates": [], "unmanaged": []}
+    days = min_age_days()
+    out = {"mods": {}, "updates": [], "pending": [], "unmanaged": []}
     for name, ent in sorted(lock.items()):
         rec = installed.get(name, {})
         info = {"version": ent.get("version"), "dev": ent.get("dev"), "installed": name in installed,
-                "changed": local_changes(rec, mod_dir(name)), "latest": None, "update": False,
+                "changed": local_changes(rec, mod_dir(name)), "latest": None, "next": None, "update": False,
                 "changelog": "", "error": None}
         if not ent.get("dev"):
             try:
                 d = fetch(ent["repo"])
-                info["latest"] = latest(d, manifest.get(name, {}).get("path", f"mods/{name}"))
-                if newer(info["latest"], ent["version"]):
+                path = manifest.get(name, {}).get("path", f"mods/{name}")
+                info["latest"] = latest(d, path)
+                info["next"], waiting = pick(d, path, ent["version"], days)
+                if info["next"]:
                     info["update"] = True
-                    log = git("-C", d, "show", f"{ref_of(info['latest'])}:CHANGELOG.md", check=False)
-                    info["changelog"] = changelog(log, ent["version"], info["latest"])
+                    log = git("-C", d, "show", f"{ref_of(info['next'])}:CHANGELOG.md", check=False)
+                    info["changelog"] = changelog(log, ent["version"], info["next"])
                     out["updates"].append(name)
+                if waiting:
+                    out["pending"].append({"name": name, "version": waiting[0], "available_on": day(waiting[1])})
             except Fail as e:
                 info["error"] = str(e)
         out["mods"][name] = info
@@ -1224,7 +1296,8 @@ def cmd_status(a):
         if i["dev"]:
             bits.append(f"dev: {i['dev']}")
         if i["update"]:
-            bits.append(f"update available: {i['latest']}")
+            bits.append(f"update available: {i['next']}")
+        bits += [f"{p['version']} waiting until {p['available_on']}" for p in out["pending"] if p["name"] == name]
         if i["changed"]:
             bits.append(f"changed locally: {', '.join(i['changed'])}")
         if i["error"]:
@@ -1234,6 +1307,46 @@ def cmd_status(a):
         print(f"not managed by corgi (corgi enable adopts them): {', '.join(out['unmanaged'])}")
     if not lock:
         print("no mods enabled")
+    return 0
+
+
+CONFIG_KEYS = {"min-release-age": "min_release_age_days", "early-updates": "early_updates"}
+
+
+def config_value(key, cfg):
+    if key == "early-updates":
+        return "on" if cfg.get("early_updates") else "off"
+    return str(min_age_days({**cfg, "early_updates": False}))
+
+
+def cmd_config(a):
+    cfg = config()
+    if a.action == "list":
+        for k in CONFIG_KEYS:
+            print(f"{k} {config_value(k, cfg)}")
+        return 0
+    if a.key not in CONFIG_KEYS:
+        raise Fail(f"unknown setting {a.key!r}; settings: {', '.join(CONFIG_KEYS)}")
+    if a.action == "get":
+        print(config_value(a.key, cfg))
+        return 0
+    if a.value is None:
+        raise Fail(f"corgi config set {a.key} needs a value")
+    if a.key == "min-release-age":
+        if not a.value.isdigit():
+            raise Fail("min-release-age is a whole number of days, e.g. 3")
+        value = int(a.value)
+    else:
+        if a.value not in ("on", "off"):
+            raise Fail("early-updates is on or off")
+        value = a.value == "on"
+        if value and not cfg.get("early_updates"):
+            print("warning: " + WARNING.format(n=min_age_days({**cfg, "early_updates": False})))
+            if not (a.yes or ask("Turn on early updates? [y/N] ")):
+                print("early-updates stays off")
+                return 1
+    save_json(state_dir() / "config.json", {**cfg, CONFIG_KEYS[a.key]: value})
+    print(f"{a.key} {config_value(a.key, config())}")
     return 0
 
 
@@ -1265,7 +1378,15 @@ def main(argv=None):
     s.add_argument("--force", action="store_true", help="take the new version of every file (yours saved as a patch)")
     s.add_argument("--keep-mine", action="append", metavar="FILE", help="keep your version of FILE")
     s.add_argument("--take-theirs", action="append", metavar="FILE", help="take the new FILE, yours saved as a patch")
+    s.add_argument("--yes", action="store_true", help="install a mod@X.Y.Z still in its waiting period without asking")
     s.set_defaults(func=cmd_update)
+
+    s = sub.add_parser("config", help="settings: min-release-age (days), early-updates (on/off)")
+    s.add_argument("action", choices=["get", "set", "list"])
+    s.add_argument("key", nargs="?", default="")
+    s.add_argument("value", nargs="?")
+    s.add_argument("--yes", action="store_true", help="turn on early-updates without asking")
+    s.set_defaults(func=cmd_config)
 
     s = sub.add_parser("diff", help="your local changes against the installed version")
     s.add_argument("mod")

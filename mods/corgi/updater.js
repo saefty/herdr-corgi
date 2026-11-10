@@ -6,19 +6,22 @@ export const DAY = 24 * HOUR;
 
 export const due = (last, now) => !last || now - last >= DAY;
 
-// {code, stdout, stderr} of `corgi.py status --json` -> {updates: [{name, from, to, changelog}], errors: [{name, error}], error}
+// {code, stdout, stderr} of `corgi.py status --json` ->
+//   {updates: [{name, from, to, changelog}], pending: [{name, version, available_on}], errors: [{name, error}], error}
+// pending: newer releases still in their waiting period (the minimum release age).
 export function readStatus({ code, stdout, stderr }) {
   let s = null;
   try { s = JSON.parse(stdout); } catch {}
   if (code !== 0 || !s?.mods) {
     const last = (stderr ?? "").trim().split("\n").pop();
-    return { updates: [], errors: [], error: last || `corgi status failed (exit ${code})` };
+    return { updates: [], pending: [], errors: [], error: last || `corgi status failed (exit ${code})` };
   }
   return {
     updates: (s.updates ?? []).filter((n) => s.mods[n]).map((name) => {
       const m = s.mods[name];
-      return { name, from: m.version, to: m.latest, changelog: m.changelog ?? "" };
+      return { name, from: m.version, to: m.next ?? m.latest, changelog: m.changelog ?? "" };
     }),
+    pending: (s.pending ?? []).filter((p) => s.mods[p.name]),
     errors: Object.entries(s.mods).filter(([, m]) => m.error).map(([name, m]) => ({ name, error: m.error })),
     error: null,
   };
@@ -29,9 +32,16 @@ export function summary(updates) {
   return updates.length === 1 ? `Update: ${list}` : `${updates.length} updates: ${list}`;
 }
 
-// One notification per new set of updates; a failed check says nothing and forgets nothing.
+// One notification per new set of updates; a failed check says nothing and forgets nothing. Pending releases
+// never notify: they do once they become updates.
 export function decide(result, notified) {
   if (!result.updates.length) return { title: null, notified: result.error || result.errors.length ? notified : null };
   const key = result.updates.map((u) => `${u.name}@${u.to}`).sort().join(",");
   return { title: key === notified ? null : summary(result.updates), notified: key };
+}
+
+// "2026-11-13" -> "Nov 13" (local date, no time zone shift)
+export function shortDate(iso) {
+  const [y, m, d] = String(iso).split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }

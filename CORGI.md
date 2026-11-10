@@ -35,6 +35,22 @@ corgi update goto --keep-mine lib/x.js
 corgi update goto --take-theirs lib/x.js   # your version is saved as a patch under backups/
 ```
 
+### Minimum release age
+
+```sh
+corgi config list                          # min-release-age 3, early-updates off
+corgi config set min-release-age 7         # days a release waits before update offers it
+corgi config set early-updates on [--yes]  # no wait; prints a security warning and asks first
+corgi update goto@1.3.0 [--yes]            # a release still waiting: warns and asks
+```
+
+`update` and `status` offer the newest release that is at least `min-release-age` days old (default 3). A release's
+date is its annotated tag's tagger date, else its commit date; an untagged head counts by its commit date.
+`status --json` lists the mods to update in `updates` (each mod's `next` is the version `update` installs, `latest`
+the newest release) and newer releases still waiting in `pending: [{name, version, available_on}]`. Dev checkouts,
+`sync` and `rollback` ignore the wait. The settings live in `config.json` in `CORGI_HOME`
+(`min_release_age_days`, `early_updates`).
+
 `corgi customizations export` writes your changes to `customizations/<mod>.patch` in the Herdr config folder, and
 `corgi sync` re-applies them after a fresh install.
 
@@ -74,8 +90,9 @@ regex per line).
 | `~/.config/herdr-app/corgi.lock` | `{name: {version, repo, dev, history}}` |
 | `~/.local/share/corgi/installed.json` | `{name: {version, source, files: {path: sha256}, keys}}` |
 | `~/.local/share/corgi/pristine/<mod>/<version>/` | each installed version as released, the merge base |
+| `~/.local/share/corgi/config.json` | `{clone, min_release_age_days, early_updates}` |
 
 Overrides: `HERDR_APP_HOME`, `CORGI_HOME`, `CORGI_MANIFEST`, `CORGI_CHECK` (check command),
-`CORGI_HERDR_APP` (the `herdr-app` binary), `CORGI_HERDR_VERSION`.
+`CORGI_HERDR_APP` (the `herdr-app` binary), `CORGI_HERDR_VERSION`, `CORGI_NOW` (the clock, epoch seconds, for tests).
 
 Tests: `python3 -m unittest discover tests`.

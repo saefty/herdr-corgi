@@ -112,6 +112,14 @@ mod's latest release; to get updates later, clone this repo and run `./corgi.py 
 Nothing updates by itself. An update shows what changed, applies it, then runs `herdr-app check` on the mod; if the
 check fails, that mod goes back to its previous files.
 
+**New releases wait 3 days.** corgi offers a release only once it is at least 3 days old (the tag's date), so a bad
+or compromised release has time to be spotted before it reaches your machine. `status` lists newer releases still
+waiting with the day they become available. Change the wait with `./corgi.py config set min-release-age 7`.
+`./corgi.py update goto@1.3.0` installs a waiting release after a warning and a yes (or `--yes`).
+`./corgi.py config set early-updates on` drops the wait for every mod; it shows a security warning and asks first.
+Mods run with your user's permissions, so turn it on only if you trust the authors. Dev checkouts and `sync` ignore
+the wait: they install what you or `corgi.lock` name.
+
 Your own edits survive. corgi keeps a clean copy of every version it installed. A file only you changed is kept, a
 file only the release changed is replaced, and a file you both changed is merged. If the merge has a conflict, the
 whole mod stays on its old version and you choose: `./corgi.py resolve <mod>` opens an agent tab that re-applies your
@@ -120,6 +128,9 @@ release and saves yours as a patch. `./corgi.py diff <mod>` shows what you chang
 
 **Update notices inside Herdr.** The `corgi` mod checks once a day and posts one notification when new releases are
 out. Click it for the changelog and an Update button that runs `corgi.py update` in a new tab, so you see every step.
+The popup also lists releases still in their waiting period ("goto 1.3.0 available on Nov 13"), and has the wait in
+days and the early-updates switch (it shows the warning and asks for a second click). Waiting releases never
+notify; they do once they become available.
 It needs a floating block in each layout you use (`~/.config/herdr-app/layouts/<name>.json`, on the root node); the
 block draws nothing:
 

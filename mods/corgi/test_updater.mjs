@@ -1,9 +1,9 @@
 // node --test mods/corgi/test_updater.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DAY, due, readStatus, summary, decide } from "./updater.js";
+import { DAY, due, readStatus, summary, decide, shortDate } from "./updater.js";
 
-const status = (mods, updates) => ({ code: 0, stdout: JSON.stringify({ mods, updates, unmanaged: [] }), stderr: "" });
+const status = (mods, updates, pending = []) => ({ code: 0, stdout: JSON.stringify({ mods, updates, pending, unmanaged: [] }), stderr: "" });
 const mod = (o) => ({ version: "1.0.0", dev: null, installed: true, changed: [], latest: "1.0.0", update: false, changelog: "", error: null, ...o });
 
 test("checks once a day", () => {
@@ -20,6 +20,7 @@ test("reads updates and per-mod errors from status --json", () => {
   }, ["goto"]));
   assert.deepEqual(r, {
     updates: [{ name: "goto", from: "1.0.0", to: "1.3.0", changelog: "## 1.3.0\n- feat: x" }],
+    pending: [],
     errors: [{ name: "chatbar", error: "could not fetch" }],
     error: null,
   });
@@ -48,4 +49,23 @@ test("notifies once per new set of updates, never on errors", () => {
   assert.deepEqual(decide({ updates: [], errors: [{ name: "goto", error: "x" }], error: null }, first.notified), { title: null, notified: first.notified });
   // all up to date: forget, so a later release notifies
   assert.deepEqual(decide({ updates: [], errors: [], error: null }, first.notified), { title: null, notified: null });
+});
+
+test("an update goes to the newest release past its waiting period; newer ones are pending", () => {
+  const r = readStatus(status({
+    goto: mod({ latest: "1.3.0", next: "1.2.0", update: true }),
+    chatbar: mod({ latest: "1.1.0" }),
+  }, ["goto"], [{ name: "goto", version: "1.3.0", available_on: "2026-11-13" },
+                { name: "chatbar", version: "1.1.0", available_on: "2026-11-12" },
+                { name: "gone", version: "9.0.0", available_on: "2026-11-12" }]));
+  assert.deepEqual(r.updates.map((u) => `${u.name} ${u.to}`), ["goto 1.2.0"]);
+  assert.deepEqual(r.pending.map((p) => p.name), ["goto", "chatbar"]);
+  assert.equal(shortDate("2026-11-13"), "Nov 13");
+});
+
+test("pending releases never notify; they do once they become updates", () => {
+  const pendingOnly = { updates: [], pending: [{ name: "goto", version: "1.3.0", available_on: "2026-11-13" }], errors: [], error: null };
+  assert.deepEqual(decide(pendingOnly, null), { title: null, notified: null });
+  const eligible = { updates: [{ name: "goto", to: "1.3.0" }], pending: [], errors: [], error: null };
+  assert.equal(decide(eligible, null).title, "Update: goto 1.3.0");
 });

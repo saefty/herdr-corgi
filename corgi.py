@@ -100,6 +100,17 @@ def generated(rel):
     return parts[-1] in GENERATED or rel.endswith(".pyc") or any(p in GENERATED_DIRS for p in parts)
 
 
+def leftover(rel):
+    """A file Herdr or the mod itself writes into the mod folder: generated, or hidden (a cache like
+    .progress-cache.json). ponytail: any untracked dotfile counts as the mod's cache."""
+    return generated(rel) or any(p.startswith(".") for p in rel.split("/"))
+
+
+def has_mod(dest):
+    """A mod folder worth adopting has mod.json or main.js; anything else is leftovers from a disable."""
+    return (Path(dest) / "mod.json").is_file() or (Path(dest) / "main.js").is_file()
+
+
 def list_files(root):
     root, out = Path(root), []
     for dp, dns, fns in os.walk(root):
@@ -411,7 +422,7 @@ def cmd_enable(a):
             code = 1
             continue
         dest = mod_dir(s.name)
-        if dest.exists():
+        if has_mod(dest):
             rep = adopt(s.name, dest, s.dir)
             rep.show(s.name, f"adopted existing folder as {s.version}" +
                      (f", {len(rep.changed)} file(s) differ" if rep.changed else ", identical"),
@@ -449,7 +460,8 @@ def cmd_disable(a):
             print(f"  remove  {rel}")
             if not a.dry_run:
                 (dest / rel).unlink()
-    left = [r for r in list_files(dest) if r not in rec["files"] or r in changed] if dest.is_dir() else []
+    left = [r for r in list_files(dest) if r in changed or (r not in rec["files"] and not leftover(r))] \
+        if dest.is_dir() else []
     for rel in left:
         print(f"  keep    {rel} ({'changed locally' if rel in changed else 'not installed by corgi'})")
     if not a.dry_run and dest.is_dir():
@@ -457,7 +469,7 @@ def cmd_disable(a):
             for dp, _, _ in sorted(os.walk(dest), key=lambda w: -len(w[0])):
                 if dp != str(dest) and not os.listdir(dp):
                     os.rmdir(dp)
-        else:  # only generated files (gpui-kit.d.ts, __pycache__, ...) remain
+        else:  # only generated files and the mod's caches (gpui-kit.d.ts, __pycache__, .cache.json) remain
             shutil.rmtree(dest)
     unbind_keys(app_home() / "keys.json", rec.get("keys"), a.dry_run)
     if not a.dry_run:
@@ -869,7 +881,7 @@ def sync_one(name, ent, a, installed, lock, manifest):
             return 0
         return update_one(name, ent["version"], a, installed, lock, manifest)
     src = source(name, entry, None if dev else ent["version"], dev)
-    fresh = not dest.exists()
+    fresh = not has_mod(dest)
     if fresh:
         rep = install(name, src.dir, dest, {}, a.dry_run)
         rep.show(name, f"install {src.version}")

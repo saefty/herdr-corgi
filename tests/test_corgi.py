@@ -261,6 +261,34 @@ class B2Keys(Base):
         self.assertEqual(code, 0, out)
         self.assertFalse(self.live("goto").exists())
 
+    def test_disable_then_enable_restores_a_working_mod(self):
+        self.make_repo("goto", GOTO)
+        self.run_cli("enable", "goto", "--keys=skip")
+        for rel in ("gpui-kit.d.ts", "jsconfig.json", ".progress-cache.json", "__pycache__/x.pyc"):
+            write(self.live("goto") / rel, "generated")
+        code, out = self.run_cli("disable", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(self.live("goto").exists())
+        # leftovers a mod writes after disable (a copy still open) must not count as an existing mod
+        write(self.live("goto") / ".progress-cache.json", "{}")
+        write(self.live("goto") / "jsconfig.json", "{}")
+        code, out = self.run_cli("enable", "goto", "--keys=skip")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("adopted", out)
+        self.assertEqual((self.live("goto") / "main.js").read_text(), GOTO["main.js"])
+        self.assertEqual(corgi.local_changes(self.installed()["goto"], self.live("goto")), [])
+
+    def test_disable_keeps_folder_with_a_user_file(self):
+        self.make_repo("goto", GOTO)
+        self.run_cli("enable", "goto", "--keys=skip")
+        write(self.live("goto") / "gpui-kit.d.ts", "generated")
+        write(self.live("goto") / "notes.txt", "mine\n")
+        code, out = self.run_cli("disable", "goto")
+        self.assertEqual(code, 0, out)
+        self.assertIn("keep    notes.txt (not installed by corgi)", out)
+        self.assertEqual((self.live("goto") / "notes.txt").read_text(), "mine\n")
+        self.assertFalse((self.live("goto") / "main.js").exists())
+
     def test_all_without_keys_merge_never_touches_keys_and_prints_snippet(self):
         self.make_repo("goto", GOTO, keys=SNIPPET)
         write(self.app / "keys.json", self.HAND)

@@ -1,0 +1,27 @@
+{
+  "goto": {
+    "repo": "https://github.com/saefty/herdr-corgi-goto",
+    "tag": "v0.1.0",
+    "sha": "53d260093dc74fd312933f09be77e639c82d8633"
+  },
+  "pr-review": {
+    "repo": "https://github.com/saefty/herdr-corgi-pr-review",
+    "tag": "v0.1.0",
+    "sha": "fa291778ac3a55f7a598260b8277433a773c9b42"
+  },
+  "chatbar": {
+    "repo": "https://github.com/saefty/herdr-corgi-chatbar",
+    "tag": null,
+    "sha": "ded4532cea7bcd5f496a7924a698ce254b4d2445"
+  },
+  "timetrack": {
+    "repo": "https://github.com/saefty/herdr-corgi-timetrack",
+    "tag": "v0.1.0",
+    "sha": "ef55628c61d12a8c2437ee1c3684e1607d149864"
+  },
+  "dictate": {
+    "repo": "https://github.com/saefty/herdr-corgi-dictate",
+    "tag": "v0.1.0",
+    "sha": "81b3c0992472fced18c685bc10b293fbc030581d"
+  }
+}

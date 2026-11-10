@@ -51,6 +51,15 @@ corgi save goto "feat: fuzzy titles"    # copies the live folder into the checko
 corgi release goto minor                # checks, changelog from commits, bump, tag; asks before pushing
 ```
 
+```sh
+corgi bundle                            # copies each released mod into mods/<mod>/ for the herdr.dev layout
+```
+
+`bundle` takes each mod in `mods.json` (not corgi itself) at its latest `vX.Y.Z` tag, or the default branch with a
+warning, writes `mods/<mod>/BUNDLED.md` and `bundle.json` (`{mod: {repo, tag, sha}}`). CI's
+`.github/scripts/check_bundle.py` fails when a copy no longer matches its recorded tag. Edit the mod repos, then
+re-bundle.
+
 `save` refuses a checkout with uncommitted changes and skips generated files (`gpui-kit.d.ts`, `jsconfig.json`)
 and anything listed in the mod folder's `.corgi-private`. `release` runs the repo's `.github/scripts/check.py`,
 `herdr-app check` on the live folder and the private leak scan (`corgi.leaks` in the Herdr config folder, one

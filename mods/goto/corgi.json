@@ -1,0 +1,7 @@
+{
+  "name": "goto",
+  "version": "0.1.0",
+  "requires": {"herdr-app": ">=0.1.14"},
+  "provides": {"goto-api": 1},
+  "keys": "keys.json"
+}

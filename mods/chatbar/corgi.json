@@ -1,0 +1,7 @@
+{
+  "name": "chatbar",
+  "version": "0.1.0",
+  "requires": {"herdr-app": ">=0.1.14"},
+  "provides": {"chatbar-api": 1},
+  "keys": null
+}

@@ -691,5 +691,34 @@ class B4Dev(Base):
         self.assertIn("goto", out)
 
 
+class B5Bundle(Base):
+    def test_bundle_copies_releases_and_check_bundle_verifies_them(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / ".github" / "scripts"))
+        import check_bundle
+        work, _ = self.make_repo("goto", GOTO)
+        self.release(work, "goto", {"main.js": "unreleased\n"}, "0.2.0", tag=False)  # after the tag: not bundled
+        self.make_repo("chatbar", {"mod.json": "{}", "main.js": "1"}, tag=False)
+        self.make_repo("corgi", {"mod.json": "{}", "main.js": "self"})
+        out_dir = self.tmp / "out"
+        out_dir.mkdir()
+        shutil.copy(self.tmp / "mods.json", out_dir / "mods.json")
+        code, out = self.run_cli("bundle", str(out_dir))
+        self.assertEqual(code, 0, out)
+        self.assertIn("warning: chatbar has no vX.Y.Z tag; bundling main", out)
+        self.assertEqual((out_dir / "mods/goto/main.js").read_text(), GOTO["main.js"])
+        self.assertFalse((out_dir / "mods/corgi").exists())
+        b = json.loads((out_dir / "bundle.json").read_text())
+        self.assertEqual(sorted(b), ["chatbar", "goto"])
+        self.assertEqual(b["goto"]["tag"], "v0.1.0")
+        self.assertIsNone(b["chatbar"]["tag"])
+        self.assertIn(f"at v0.1.0 ({b['goto']['sha']}). Edit there, not here.",
+                      (out_dir / "mods/goto/BUNDLED.md").read_text())
+        self.assertEqual(check_bundle.verify(out_dir), [])
+        write(out_dir / "mods/goto/main.js", "edited here\n")
+        write(out_dir / "mods/goto/extra.js", "x")
+        self.assertEqual(check_bundle.verify(out_dir), ["goto: main.js differs from v0.1.0",
+                                                         "goto: extra.js is not in v0.1.0"])
+
+
 if __name__ == "__main__":
     unittest.main()

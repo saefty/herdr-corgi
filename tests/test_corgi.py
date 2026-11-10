@@ -722,3 +722,9 @@ class B5Bundle(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DropRevertedTest(unittest.TestCase):
+    def test_revert_pairs_cancel(self):
+        got = corgi.drop_reverted(["fix: a", "fix: b", 'Revert "fix: b"', "docs: c"])
+        self.assertEqual(got, ["fix: a", "docs: c"])

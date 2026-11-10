@@ -1091,6 +1091,12 @@ def changelog_section(version, subjects):
     return "\n".join(parts)
 
 
+def drop_reverted(subjects):
+    """A commit and its `Revert "<subject>"` cancel out: neither belongs in the changelog."""
+    reverted = {x[len('Revert "'):-1] for x in subjects if x.startswith('Revert "') and x.endswith('"')}
+    return [x for x in subjects if x not in reverted and not (x.startswith('Revert "') and x[len('Revert "'):-1] in reverted)]
+
+
 def cmd_release(a):
     installed, lock = load_state()
     co = checkout_of(a.mod, lock)
@@ -1118,8 +1124,8 @@ def cmd_release(a):
         print("\n".join(problems) + f"\n{a.mod}: not released")
         return 1
     last = git("-C", co, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", check=False).strip()
-    subjects = [s for s in git("-C", co, "log", "--reverse", "--format=%s", f"{last}..HEAD" if last else "HEAD")
-                .splitlines() if not s.startswith("chore(release)")]
+    subjects = drop_reverted([s for s in git("-C", co, "log", "--reverse", "--format=%s", f"{last}..HEAD" if last else "HEAD")
+                              .splitlines() if not s.startswith("chore(release)")])
     if not subjects:
         print(f"{a.mod}: no commits since {last or 'the start'}, nothing to release")
         return 0

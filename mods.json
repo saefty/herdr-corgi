@@ -1,0 +1,34 @@
+{
+  "mods": {
+    "goto": {
+      "repo": "https://github.com/saefty/herdr-corgi-goto.git",
+      "path": "mods/goto",
+      "default": true
+    },
+    "pr-review": {
+      "repo": "https://github.com/saefty/herdr-corgi-pr-review.git",
+      "path": "mods/pr-review",
+      "default": true
+    },
+    "chatbar": {
+      "repo": "https://github.com/saefty/herdr-corgi-chatbar.git",
+      "path": "mods/chatbar",
+      "default": true
+    },
+    "timetrack": {
+      "repo": "https://github.com/saefty/herdr-corgi-timetrack.git",
+      "path": "mods/timetrack",
+      "default": true
+    },
+    "dictate": {
+      "repo": "https://github.com/saefty/herdr-corgi-dictate.git",
+      "path": "mods/dictate",
+      "default": true
+    },
+    "corgi": {
+      "repo": "https://github.com/saefty/herdr-corgi.git",
+      "path": "mods/corgi",
+      "default": true
+    }
+  }
+}

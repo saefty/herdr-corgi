@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
+  <!-- window: canvas -->
+  <rect width="320" height="200" rx="8" fill="#1b1e24"/>
+  <!-- left sidebar: spaces and agents -->
+  <path d="M8 0h64v200H8a8 8 0 0 1-8-8V8a8 8 0 0 1 8-8z" fill="#23272e"/>
+  <circle cx="9" cy="9" r="2.5" fill="#e06c75"/><circle cx="17" cy="9" r="2.5" fill="#e5c07b"/><circle cx="25" cy="9" r="2.5" fill="#98c379"/>
+  <g fill="#3a3f4b">
+    <rect x="7" y="22" width="58" height="11" rx="3" fill="#3e4451"/>
+    <rect x="7" y="37" width="58" height="9" rx="3"/>
+    <rect x="7" y="50" width="58" height="9" rx="3"/>
+    <rect x="7" y="106" width="58" height="9" rx="3"/>
+    <rect x="7" y="119" width="58" height="9" rx="3"/>
+    <rect x="7" y="132" width="58" height="9" rx="3"/>
+  </g>
+  <rect x="7" y="96" width="24" height="4" rx="2" fill="#5c6370"/>
+  <circle cx="61" cy="110.5" r="2" fill="#61afef"/><circle cx="61" cy="123.5" r="2" fill="#e5c07b"/><circle cx="61" cy="136.5" r="2" fill="#5c6370"/>
+  <rect x="72" width="1" height="200" fill="#333842"/>
+  <!-- top: tab bar with the time chip at its right end -->
+  <rect x="73" width="247" height="18" fill="#23272e"/>
+  <rect x="80" y="4" width="34" height="10" rx="3" fill="#3e4451"/>
+  <rect x="118" y="4" width="30" height="10" rx="3" fill="#2c313a"/>
+  <rect x="152" y="4" width="30" height="10" rx="3" fill="#2c313a"/>
+  <rect x="284" y="4" width="30" height="10" rx="5" fill="#2c313a" stroke="#98c379" stroke-width="0.8"/>
+  <circle cx="290" cy="9" r="1.8" fill="#98c379"/>
+  <rect x="294" y="7.5" width="16" height="3" rx="1.5" fill="#abb2bf"/>
+  <!-- main: the tab's panes -->
+  <rect x="77" y="22" width="152" height="164" rx="5" fill="#282c34" stroke="#61afef" stroke-width="0.8"/>
+  <rect x="77" y="22" width="152" height="10" rx="5" fill="#2c313a"/>
+  <g fill="#5c6370"><rect x="83" y="38" width="90" height="3" rx="1.5"/><rect x="83" y="45" width="120" height="3" rx="1.5"/><rect x="83" y="52" width="70" height="3" rx="1.5"/><rect x="83" y="59" width="104" height="3" rx="1.5"/></g>
+  <rect x="83" y="66" width="56" height="3" rx="1.5" fill="#98c379"/>
+  <!-- floats: dictate (bottom center), chat bar (bottom right) -->
+  <rect x="138" y="166" width="30" height="12" rx="4" fill="#2c313a" stroke="#4b5263" stroke-width="0.6"/>
+  <circle cx="144" cy="172" r="2" fill="#e06c75"/>
+  <rect x="148" y="170.5" width="15" height="3" rx="1.5" fill="#abb2bf"/>
+  <rect x="173" y="148" width="52" height="30" rx="4" fill="#2c313a" stroke="#4b5263" stroke-width="0.6"/>
+  <rect x="178" y="153" width="34" height="3" rx="1.5" fill="#abb2bf"/>
+  <rect x="178" y="160" width="42" height="3" rx="1.5" fill="#5c6370"/>
+  <rect x="178" y="167" width="18" height="7" rx="2" fill="#61afef"/>
+  <rect x="199" y="167" width="18" height="7" rx="2" fill="#3e4451"/>
+  <!-- right: the PR review panel -->
+  <rect x="233" y="22" width="83" height="164" rx="5" fill="#282c34" stroke="#333842" stroke-width="0.8"/>
+  <rect x="238" y="28" width="52" height="5" rx="2" fill="#abb2bf"/>
+  <g>
+    <rect x="238" y="40" width="73" height="5" fill="#98c379" fill-opacity="0.2"/>
+    <rect x="238" y="46" width="73" height="5" fill="#e06c75" fill-opacity="0.2"/>
+    <rect x="238" y="52" width="73" height="5" fill="#98c379" fill-opacity="0.2"/>
+    <rect x="238" y="58" width="73" height="5" fill="#98c379" fill-opacity="0.2"/>
+    <rect x="238" y="66" width="73" height="5" fill="#2c313a"/>
+    <rect x="238" y="72" width="73" height="5" fill="#e5c07b" fill-opacity="0.27"/>
+    <rect x="238" y="78" width="73" height="5" fill="#98c379" fill-opacity="0.2"/>
+  </g>
+  <rect x="238" y="170" width="34" height="10" rx="3" fill="#2c313a"/>
+  <rect x="276" y="170" width="35" height="10" rx="3" fill="#61afef"/>
+  <!-- bottom: status bar -->
+  <rect x="73" y="190" width="247" height="10" fill="#23272e"/>
+  <path d="M73 190h247v2H73z" fill="#333842"/>
+  <rect x="80" y="194" width="40" height="3" rx="1.5" fill="#5c6370"/>
+</svg>

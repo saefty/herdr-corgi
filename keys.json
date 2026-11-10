@@ -1,0 +1,10 @@
+{
+  "global": {
+    "cmd-shift-p": "mod.open:goto",
+    "cmd-alt-shift-p": "app.palette",
+    "cmd-shift-m": "dictate.toggle"
+  },
+  "layout:corgi": {
+    "cmd-shift-b": "layout.toggle:review"
+  }
+}

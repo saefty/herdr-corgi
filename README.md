@@ -82,6 +82,24 @@ Give it this, in a Herdr terminal:
 Read ~/.config/herdr-app/AGENTS.md, clone https://github.com/saefty/herdr-corgi, read its README, run ./corgi.py enable --all --dry-run, show me the result, and run it for real after I say yes.
 ```
 
+## Install as a layout
+
+Want the whole window at once? The Corgi layout puts Herdr's sidebar and tab bar together with the time chip in the
+tab row, the PR panel on the right, and the chat bar and dictation over your terminals.
+
+<p align="center"><img src="preview.png" width="88%" alt="The Corgi layout with a demo PR, a working agent and a chat bubble" /></p>
+
+Give your agent this, in a Herdr terminal:
+
+```text
+Read ~/.config/herdr-app/AGENTS.md, then add this layout: https://github.com/saefty/herdr-corgi/tree/main
+```
+
+It copies `layouts/corgi.json` and the folders in `mods/`, merges `keys.json` (⌘⇧P Go to, ⌘⇧M dictate, ⌘⇧B the PR
+column) and switches to the layout. `ctrl-shift-l` switches back to yours. The mods in `mods/` are copies of each
+mod's latest release; to get updates later, clone this repo and run `./corgi.py enable --all`.
+[RECIPE.md](RECIPE.md) describes the layout piece by piece.
+
 ## Updates
 
 ```bash

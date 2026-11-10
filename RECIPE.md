@@ -1,6 +1,6 @@
 # Corgi
 
-One Herdr window for working with coding agents. Find anything already open, answer agents from a chat bar, review PRs with an AI walkthrough, dictate replies and track your work time.
+One Herdr window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, a security blast radius, state diagrams and sample values in the diff, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.
 
 ![Corgi](preview.png)
 

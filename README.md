@@ -2,9 +2,9 @@
 
 <h3 align="center">Five Herdr mods that work alone and click together when you install more than one</h3>
 
-<p align="center">Corgi is a small set of mods for the <a href="https://herdr.dev">Herdr app</a>: a ⌘⇧P box that finds what you already have open, a pull request review, a chat bar for agents that wait on you, a work time tracker and dictation. Each one lives in its own repo and works without the others. Install two and they find each other on their own. The <code>corgi</code> command installs any of them, keeps your own edits through updates, and can roll back.</p>
+<p align="center">One <a href="https://herdr.dev">Herdr</a> window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, a security blast radius, state diagrams and sample values in the diff, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.</p>
 
-<p align="center"><img src="docs/previews/goto.png" width="88%" alt="Go to: a search box over Herdr that found an agent by a few words of its task" /></p>
+<p align="center"><img src="preview.png" width="88%" alt="Corgi: the PR review's architecture impact map, the Go to box finding what's open, and chat bubbles of agents waiting on you" /></p>
 
 <p align="center"><sub>✓&nbsp;Free,&nbsp;MIT&nbsp;licensed &nbsp; ✓&nbsp;Runs&nbsp;locally &nbsp; ✓&nbsp;herdr-app&nbsp;0.1.14+</sub></p>
 
@@ -23,40 +23,15 @@
 `enable` asks before it adds shortcuts to your `keys.json`. With `--all` it never touches `keys.json` unless you add
 `--keys=merge`; otherwise it prints the shortcuts for you to add by hand. A key you already use is never rebound.
 
-## The mods
+## What's inside
 
-### Go to
-
-A ⌘⇧P box that finds what is already open before it opens anything new: agents by a few words of their task, spaces,
-repos, pull requests, URLs and Herdr's own commands. The other mods add their rows to it.
-[herdr-corgi-goto](https://github.com/saefty/herdr-corgi-goto)
-
-### PR review
-
-A side panel with the focused branch's diff and a full review layout: an AI walkthrough by risk and layer, reviewer
-agents whose findings you send back to the agent that wrote the code, and comments posted as one GitHub review.
-[herdr-corgi-pr-review](https://github.com/saefty/herdr-corgi-pr-review)
-
-<p align="center"><img src="docs/previews/pr-review.png" width="88%" alt="The review layout's overview of a demo pull request" /></p>
-
-### Chat bar
-
-One bubble per agent that waits on you, in the corner of every layout. Read the question, press an option or type a
-reply, and stay where you are. [herdr-corgi-chatbar](https://github.com/saefty/herdr-corgi-chatbar)
-
-<p align="center"><img src="docs/previews/chatbar.png" width="88%" alt="The chat bar with an agent asking for permission" /></p>
-
-### Time tracker
-
-A chip that counts your work time today while you are at the keyboard, in Herdr, in your work apps or while your
-agents run. Every day lands in an Excel workbook. [herdr-corgi-timetrack](https://github.com/saefty/herdr-corgi-timetrack)
-
-<p align="center"><img src="docs/previews/timetrack.png" width="60%" alt="The time tracker's popup with today's timeline" /></p>
-
-### Dictate
-
-Press a key, speak, press it again: the text is transcribed on your Mac and lands where your cursor is, never sent.
-macOS on Apple Silicon. [herdr-corgi-dictate](https://github.com/saefty/herdr-corgi-dictate)
+| | |
+|---|---|
+| <img src="docs/previews/pr-review.png" width="240" alt="PR review" /> | **[PR review](https://github.com/saefty/herdr-corgi-pr-review)**: a side panel with the branch's diff and a full-window review: layers by risk, an architecture impact map, a security blast radius, sample values in the diff, reviewer agents whose findings you send back to fix and verify, and comments posted as one GitHub review. |
+| <img src="docs/previews/goto.png" width="240" alt="Go to" /> | **[Go to](https://github.com/saefty/herdr-corgi-goto)**: a ⌘⇧P box that finds what is already open before it opens anything new: agents by a few words of their task, spaces, repos, PRs, URLs and Herdr's commands. |
+| <img src="docs/previews/chatbar.png" width="240" alt="Chat bar" /> | **[Chat bar](https://github.com/saefty/herdr-corgi-chatbar)**: one bubble per agent that waits on you. Read the question, press an option or type a reply, and stay where you are. |
+| <img src="docs/screenshots/interplay-dictate.png" width="240" alt="Dictate" /> | **[Dictate](https://github.com/saefty/herdr-corgi-dictate)**: press a key, speak, press it again; the text is transcribed on your Mac and lands where your cursor is, never sent. macOS on Apple Silicon. |
+| <img src="docs/previews/timetrack.png" width="240" alt="Time tracker" /> | **[Time tracker](https://github.com/saefty/herdr-corgi-timetrack)**: a chip that counts today's work time while you or your agents work, and writes every day to an Excel workbook. |
 
 ## Better together
 
@@ -86,8 +61,6 @@ Read ~/.config/herdr-app/AGENTS.md, clone https://github.com/saefty/herdr-corgi,
 
 Want the whole window at once? The Corgi layout puts Herdr's sidebar and tab bar together with the time chip in the
 tab row, the PR panel on the right, and the chat bar and dictation over your terminals.
-
-<p align="center"><img src="preview.png" width="88%" alt="The Corgi layout with a demo PR, a working agent and a chat bubble" /></p>
 
 Give your agent this, in a Herdr terminal:
 

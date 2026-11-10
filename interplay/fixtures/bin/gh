@@ -1,0 +1,11 @@
+#!/bin/sh
+# A stand-in for the GitHub CLI: logged in, and answers `gh pr view` for the invented PR #7 (by number with
+# -R acme/bookshelf, or by URL) from run/gh-pr7.json, which setup.sh writes with the demo repo's real head. Everything
+# else fails. No network.
+[ "$1 $2" = "auth status" ] && exit 0
+if [ "$1 $2" = "pr view" ] && { [ "$3 $4 $5" = "7 -R acme/bookshelf" ] || [ "$3" = "https://github.com/acme/bookshelf/pull/7" ]; }; then
+  cat "$(dirname "$0")/../../run/gh-pr7.json"
+  exit 0
+fi
+echo "demo gh: no network" >&2
+exit 1

@@ -1,0 +1,131 @@
+{
+  "id": "root",
+  "type": "row",
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "size": {
+        "px": 240
+      },
+      "min": 40,
+      "max": 480,
+      "divider": {
+        "width": 1,
+        "color": "border"
+      },
+      "children": [
+        {
+          "id": "spaces",
+          "type": "block",
+          "content": {
+            "mod": "spaces"
+          }
+        },
+        {
+          "id": "agents",
+          "type": "block",
+          "content": {
+            "mod": "agents"
+          }
+        },
+        {
+          "id": "interplay",
+          "type": "block",
+          "size": {
+            "px": 0
+          },
+          "content": {
+            "mod": "interplay"
+          }
+        }
+      ]
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "top",
+          "type": "row",
+          "size": {
+            "px": 30
+          },
+          "children": [
+            {
+              "id": "tabs",
+              "type": "block",
+              "content": {
+                "mod": "tabs"
+              }
+            },
+            {
+              "id": "timetrack",
+              "type": "block",
+              "size": {
+                "px": 76
+              },
+              "content": {
+                "mod": "timetrack",
+                "props": {
+                  "part": "bar"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "main",
+          "type": "block",
+          "content": {
+            "tab": "active",
+            "pane": {
+              "gap": 6,
+              "radius": 6,
+              "border": {
+                "width": 1,
+                "color": "border"
+              },
+              "focus": {
+                "width": 1,
+                "color": "accent"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "pr-review",
+      "type": "block",
+      "size": {
+        "px": 380
+      },
+      "content": {
+        "mod": "pr-review"
+      }
+    }
+  ],
+  "floating": [
+    {
+      "id": "chatbar",
+      "content": {
+        "mod": "chatbar"
+      },
+      "edge": "bottom",
+      "align": "end"
+    },
+    {
+      "id": "dictate",
+      "content": {
+        "mod": "dictate"
+      },
+      "edge": "bottom",
+      "align": "center"
+    }
+  ]
+}

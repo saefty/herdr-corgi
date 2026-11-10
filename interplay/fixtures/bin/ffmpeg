@@ -1,0 +1,8 @@
+#!/bin/sh
+# A stand-in for ffmpeg recording the microphone (dictate's voice.py start): writes one second of silence to the
+# output file (the last argument) and waits to be stopped, as the real one does on SIGINT. Never opens a microphone.
+for out; do :; done
+python3 -c 'import sys, wave
+w = wave.open(sys.argv[1], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\0\0" * 16000); w.close()' "$out"
+trap 'exit 0' INT TERM
+while :; do sleep 0.2; done

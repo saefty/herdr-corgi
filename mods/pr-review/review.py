@@ -27,6 +27,8 @@ import llm  # noqa: E402  (this folder)
 
 FEATURE = "Review analysis"
 FEATURE_INC = "Review analysis (since last review)"
+FEATURE_DIAGRAMS = "Review diagrams"
+BUDGET_DIAGRAMS = {"haiku": 0.5, "sonnet": 1.5, "opus": 5.0}
 BUDGET = {"haiku": 1.0, "sonnet": 3.0, "opus": 10.0}  # --max-budget-usd per run
 TIMEOUT = 15 * 60
 KEY = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,6})(?![A-Za-z0-9])")
@@ -46,20 +48,34 @@ FLOW = {"type": "object", "required": ["function", "at", "inputs", "output"], "p
     "side_effects": STRINGS, "calls": STRINGS,
     "trace": {"type": "array", "maxItems": 12, "items": {"type": "object", "required": ["path", "line", "values"], "properties": {
         "path": S, "line": {"type": "integer"}, "values": S}}}}}
-# A picture of one layer; the model picks the kind that explains it best (or leaves it out).
+# A picture of one layer (or of the whole PR); the model picks the kinds that explain it best (or leaves them out).
+# state_machine: nodes may carry a type (Step Functions state types), parent/branch (inside a Parallel or Map state);
+# transitions carry event [guard] / action, and error ("catch" | "retry") for error paths.
+# Where an element comes from: implemented (in this PR's diff; evidence file:line), existing (already in the codebase,
+# unchanged), spec (only in the PR description, ticket, ADRs or spec docs, not found in the diff).
+SOURCE = {"enum": ["implemented", "existing", "spec"]}
+STATEMENT = {"type": "object", "required": ["text", "source"], "properties": {"text": S, "source": SOURCE, "evidence": S}}
+STATE_TYPES = ["task", "choice", "parallel", "map", "wait", "pass", "fail", "succeed", "state"]
+TRANSITION = {"type": "object", "required": ["from", "to"], "properties": {
+    "from": S, "to": S, "label": S, "event": S, "guard": S, "action": S, "changed": {"type": "boolean"}, "error": {"enum": ["catch", "retry"]},
+    "source": SOURCE, "evidence": S}}
 VISUAL = {"type": "object", "required": ["kind", "title", "nodes", "edges"], "properties": {
     "kind": {"enum": ["architecture", "flow", "sequence", "state_machine", "steps"]}, "title": S,
-    "nodes": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["id", "label"], "properties": {
-        "id": S, "label": S, "changed": {"type": "boolean"}, "note": S, "at": S}}},
-    "edges": {"type": "array", "maxItems": 12, "items": {"type": "object", "required": ["from", "to"], "properties": {
-        "from": S, "to": S, "label": S, "changed": {"type": "boolean"}}}}}}
+    "nodes": {"type": "array", "maxItems": 12, "items": {"type": "object", "required": ["id", "label"], "properties": {
+        "id": S, "label": S, "changed": {"type": "boolean"}, "note": S, "at": S, "type": {"enum": STATE_TYPES}, "parent": S, "branch": {"type": "integer"},
+        "source": SOURCE, "evidence": S}}},
+    "edges": {"type": "array", "maxItems": 16, "items": TRANSITION},
+    "transitions": {"type": "array", "maxItems": 16, "items": TRANSITION}}}
+VISUALS = {"type": "array", "maxItems": 3, "items": VISUAL}
 STATUS = {"enum": ["new", "changed", "unchanged", "removed"]}
 ARCHITECTURE = {"type": "object", "required": ["groups", "nodes", "edges"], "properties": {
     "groups": {"type": "array", "maxItems": 5, "items": {"type": "object", "required": ["id", "label", "kind"], "properties": {"id": S, "label": S, "kind": S}}},
     "nodes": {"type": "array", "maxItems": 12, "items": {"type": "object", "required": ["id", "group", "label", "description", "type", "status"], "properties": {
-        "id": S, "group": S, "label": S, "description": S, "type": S, "status": STATUS, "at": S}}},
+        "id": S, "group": S, "label": S, "description": S, "type": S, "status": STATUS, "at": S, "source": SOURCE, "evidence": S,
+        "states": {"type": "array", "maxItems": 10, "items": {"type": "object", "required": ["name", "type"], "properties": {
+            "name": S, "type": {"enum": STATE_TYPES}, "calls": S, "status": STATUS, "source": SOURCE, "evidence": S}}}}}},
     "edges": {"type": "array", "maxItems": 16, "items": {"type": "object", "required": ["from", "to", "label"], "properties": {
-        "from": S, "to": S, "label": S, "status": STATUS}}}}}
+        "from": S, "to": S, "label": S, "status": STATUS, "source": SOURCE, "evidence": S}}}}}
 BLAST = {"type": "object", "required": ["units", "context"], "properties": {
     "units": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["id", "label", "type", "status", "files", "spots"], "properties": {
         "id": S, "label": S, "type": S, "status": {"enum": ["added", "changed", "removed"]}, "files": STRINGS, "spots": {"type": "integer"}}}},
@@ -71,15 +87,16 @@ SCHEMA = {"type": "object", "required": ["title", "summary", "behavior", "merge_
     "effort": {"type": "object", "required": ["score", "why"], "properties": {"score": {"type": "integer", "minimum": 1, "maximum": 5}, "why": S}},
     "rule_checks": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["rule", "source", "status", "why"], "properties": {
         "rule": S, "source": S, "status": {"enum": ["pass", "fail", "n/a"]}, "where": S, "why": S}}},
-    "architecture": ARCHITECTURE, "blast_radius": BLAST,
+    "architecture": ARCHITECTURE, "blast_radius": BLAST, "visuals": VISUALS,
+    "intent": {"type": "array", "maxItems": 6, "items": STATEMENT}, "behavior_points": {"type": "array", "maxItems": 6, "items": STATEMENT},
     "asks": {"type": "array", "items": {"type": "object", "required": ["text", "coverage", "hunks"], "properties": {
-        "text": S, "coverage": {"enum": ["seen", "partly", "absent", "extra"]}, "hunks": STRINGS}}},
+        "text": S, "coverage": {"enum": ["seen", "partly", "absent", "extra"]}, "hunks": STRINGS, "elements": STRINGS}}},
     "steps": {"type": "array", "items": {"type": "object", "required": ["title", "risk", "why_it_matters", "explanation", "reading_order", "hunks", "check_questions"], "properties": {
         "title": S, "risk": {"enum": LEVELS + ["skim"]}, "why_it_matters": S, "explanation": S, "reading_order": {"type": "integer"},
         "hunks": STRINGS, "check_questions": {**STRINGS, "maxItems": 3},
         "suggestions": {"type": "array", "items": {"type": "object", "required": ["hunk", "line", "side", "severity", "text"], "properties": {
             "hunk": S, "line": {"type": "integer"}, "side": {"enum": ["new", "old"]}, "severity": {"enum": LEVELS}, "text": S}}},
-        "flows": {"type": "array", "maxItems": 3, "items": FLOW}, "visual": VISUAL}}}}}
+        "flows": {"type": "array", "maxItems": 3, "items": FLOW}, "visuals": VISUALS}}}}}
 
 
 def jira_key(title, branch, body):
@@ -252,18 +269,37 @@ def prompt(hunks, cut, task_text, tools, rules="", candidates=(), previous=None,
             "examples concrete and realistic, derived from the code (types, structs, JSON bodies, DTOs, SQL rows, events), at most "
             "12 lines, invent nothing; trace: ONE example input followed through the function like in a debugger: per line path, "
             "line (new side, only lines in the diff), values (\"name = value, name2 = value2\": what parameters, locals and the "
-            "return value hold there for the example), at most 12 lines); visual (optional, only when a picture explains more than "
-            "text: pick the fitting form, kind architecture (components and what changes between them), flow (data/control flow, "
-            "edges with payload), sequence (who calls whom in which order; edges in order), state_machine (states and transitions, "
-            "changed ones marked) or steps (an ordered procedure); at most 8 nodes (id, label, changed, note: what changes at this "
-            "node, at: file:line in the new version), edges (from, to, label, changed)). The steps are layers: group by intent "
-            "(e.g. data model, API, emails, UI), reading_order with the foundation first.\n\ntitle/summary: the PR in one line and "
+            "return value hold there for the example), at most 12 lines); visuals (optional, only when pictures explain more than "
+            "text: pick every view that explains something the others don't, usually 1-3, never the same kind twice for the same "
+            "thing: kind architecture (components and what changes between them), flow (data/control flow, edges with payload), "
+            "sequence (who calls whom in which order; edges in order), state_machine or steps (an ordered procedure); at most 12 "
+            "nodes (id, label, changed, note: what changes at this node, at: file:line in the new version), edges (from, to, label, "
+            "changed)). state_machine is drawn top to bottom and covers two cases. A state diagram: pick it when the PR changes "
+            "how an entity's status or state field evolves (enum statuses, status columns, workflow states); title names the "
+            "entity (e.g. \"Loan\"); nodes are its states, transitions (from, to, event, guard, action, changed) are what moves it "
+            "between them, back edges and self-transitions allowed; mark the transitions the PR adds or changes. An orchestration: "
+            "pick it for a Step Functions or workflow definition; nodes are its states with type (task, choice, parallel, map, "
+            "wait, pass, fail, succeed), states inside a Parallel or Map state have parent (its id) and branch (0, 1, …); "
+            "transitions in execution order, a choice's ways labelled with their condition, Catch and Retry as transitions with "
+            "error catch or retry (label e.g. \"Retry ×3\"). The steps are layers: group by intent "
+            "(e.g. data model, API, emails, UI), reading_order with the foundation first.\n\nSources: every node, edge, "
+            "state and transition in architecture and visuals, and every intent and behavior statement, gets a source: "
+            "implemented (in this PR's diff; evidence: file:line in the new version, required), existing (already in the "
+            "codebase and unchanged; evidence where known), spec (only described in the PR description, the linked ticket, "
+            "ADRs or spec docs, and NOT found in the diff: planned or missing). Never present a spec-only item as implemented: "
+            "when you can't point at the diff, use spec.\n\ntitle/summary: the PR in one line and "
             "in 2-3 sentences. behavior: 2-3 sentences on how the application's behavior changes, also for users (no code). "
+            "intent and behavior_points: the PR's intent and its behavior change as single statements (at most 6 each), each "
+            "with source and evidence (see Sources). "
             "merge_risk: level (minimal, low, medium, high, critical) and why (one sentence). effort: score 1-5 (1: minutes, 5: hours "
             "of focused work) and why. architecture: the picture of the whole PR: groups (systems, e.g. label \"Web application\", "
             "kind \"Client\"), nodes (id, group, label, description in 1-2 lines, type such as component, api·service, data, "
-            "service, status new/changed/unchanged/removed, at: file:line), edges (from, to, label: what happens, e.g. \"Creates "
-            "invitation\"); at most 12 nodes, empty lists when the PR touches no architecture. blast_radius: units (the changed "
+            "service, orchestration, status new/changed/unchanged/removed, at: file:line; an orchestrator such as a Step Functions "
+            "state machine may list its states in order (name, type task/choice/parallel/map/wait/pass/fail/succeed, calls: the id "
+            "of the node a task state invokes, status), each call is then drawn from that state's row), edges (from, to, label: "
+            "what happens, e.g. \"Creates invitation\"; draw them in call direction, caller to callee); at most 12 nodes, empty "
+            "lists when the PR touches no architecture. visuals (optional, at most 3): pictures of the whole PR the architecture "
+            "doesn't show, same form as a layer's (e.g. the state diagram of an entity whose lifecycle changed). blast_radius: units (the changed "
             "units: id, label, type, status added/changed/removed, files, spots = number of changed places) and context (unchanged "
             "files that call the change (upstream) or are called by it (downstream): file as an existing path, relation one "
             "sentence, links_to the unit's id); only checked paths, at most 8.")
@@ -279,7 +315,8 @@ def prompt(hunks, cut, task_text, tools, rules="", candidates=(), previous=None,
                  "The analysis so far:\n" + previous)
     if task_text and not previous:
         text += ("\n\nasks: Break the task below into its requirements. Per requirement: text (short), coverage (seen: done; "
-                 "partly: partly; absent: missing), hunks. Plus one entry with coverage extra for each change the task "
+                 "partly: partly; absent: missing), hunks, elements (ids of the architecture or visual nodes with source spec that "
+                 "this requirement describes, if any). Plus one entry with coverage extra for each change the task "
                  "doesn't ask for (text: what, hunks: where).\n\nTask:\n" + task_text[:8000])
     else:
         text += "\n\nasks: empty list."
@@ -344,6 +381,73 @@ def merge_incremental(prev, answer, inc, full):
     return hunks, merged
 
 
+# ---- Refresh diagrams: only the pictures again (architecture, the PR's and each layer's visuals, with sources), for
+# today's diff, with the shown analysis' layers as context. The text analysis stays as it is.
+
+DIAGRAMS_SCHEMA = {"type": "object", "required": ["architecture", "layers"], "properties": {
+    "architecture": ARCHITECTURE, "visuals": VISUALS,
+    "layers": {"type": "array", "items": {"type": "object", "required": ["layer", "visuals"], "properties": {
+        "layer": {"type": "integer"}, "visuals": VISUALS}}}}}
+
+
+def picture_guide(lang):
+    """The full prompt's guidance on pictures and sources (sliced out of it, so both prompts say the same)."""
+    full = prompt([], [], None, False, lang=lang)
+    cut = lambda a, b: full[full.index(a):full.index(b, full.index(a))]  # noqa: E731
+    return "\n\n".join([cut("visuals (optional", " The steps are layers"), cut("Sources:", "\n\ntitle/summary"),
+                         cut("architecture: the picture", " blast_radius:")])
+
+
+def diagrams_prompt(hunks, prev, task_text, tools, lang="English"):
+    a = prev.get("answer") or {}
+    layers = "\n".join(f"{k}. {x.get('title', '')}: {x.get('explanation', '')} (hunks {', '.join(x.get('hunks') or [])})"
+                       for k, x in enumerate(a.get("steps") or []))
+    return ("Draw the pictures of this pull request again from the diff below: architecture, visuals for the whole PR, and "
+            "per layer (by its number) its visuals. Only the pictures: the layers and texts stay as they are." +
+            (" You are in a checkout of the PR head and may read it to check what exists." if tools else "") +
+            f" Write every text field in {lang}.\n\n" + picture_guide(lang) +
+            f"\n\nTitle: {a.get('title', '')}\nSummary: {a.get('summary', '')}\n\nLayers:\n{layers}" +
+            ("\n\nTask (PR description and ticket; what is only here is spec):\n" + task_text[:8000] if task_text else "") +
+            "\n\nDiff:\n" + "\n\n".join(f"### {h['alias']} {h['path']}\n" + "\n".join(numbered(h["lines"])) for h in hunks))
+
+
+def merge_diagrams(prev, answer, head, meta):
+    """The saved analysis with only its pictures replaced: architecture, the PR's visuals, each layer's visuals (by
+    number; a layer the answer leaves out keeps none). Text, layers, asks stay. diagrams: when, for which head."""
+    a = dict(prev.get("answer") or {})
+    per = {int(x.get("layer", -1)): x.get("visuals") or [] for x in answer.get("layers") or []}
+    a["architecture"] = answer.get("architecture") or {"groups": [], "nodes": [], "edges": []}
+    a["visuals"] = answer.get("visuals") or []
+    a["steps"] = [{**{k: v for k, v in x.items() if k != "visual"}, "visuals": per.get(k, [])} for k, x in enumerate(a.get("steps") or [])]
+    return {**prev, "answer": a, "diagrams": {"generated": dt.datetime.now().astimezone().isoformat(), "head": head,
+                                              "model": meta.get("model_id"), "cost": meta.get("cost")}}
+
+
+def main_diagrams(req):
+    """req: {diagrams: the analysis file to refresh, also: other files holding the same analysis, head, model, context,
+    pr, worktree, hunks, status}."""
+    model, ctx, wt, lang = req["model"], req.get("context"), req.get("worktree"), llm.language()
+    prev = json.loads(pathlib.Path(req["diagrams"]).read_text())
+    t = task(req.get("pr"), (ctx or {}).get("tickets", True))
+    tools = bool(wt and pathlib.Path(wt).is_dir())
+    extra = ("--allowedTools", *READ_ONLY, "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch") if tools else ()
+    meta = {}
+    answer = llm.claude(FEATURE_DIAGRAMS, diagrams_prompt(req["hunks"], prev, t and t["text"], tools, lang), context=ctx, model=model,
+                        schema=DIAGRAMS_SCHEMA, system=SYSTEM.format(lang=lang), budget=BUDGET_DIAGRAMS[model], timeout=TIMEOUT,
+                        cwd=wt if tools else pathlib.Path.home(), tools="Read,Grep,Glob,Bash" if tools else "", meta=meta, extra=extra)
+    if not answer:
+        raise RuntimeError(f"{FEATURE_DIAGRAMS}: no answer")
+    result = merge_diagrams(prev, answer, req.get("head"), meta)
+    for path in [req["diagrams"], *(req.get("also") or [])]:  # only files that still hold this analysis
+        try:
+            same = json.loads(pathlib.Path(path).read_text()).get("generated") == prev.get("generated")
+        except (OSError, ValueError):
+            same = False
+        if same:
+            save(path, result)
+    return {"cost": meta.get("cost"), "ms": meta.get("ms"), "model_id": meta.get("model_id", model)}
+
+
 def save(path, value):
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,7 +496,7 @@ if __name__ == "__main__":
     if status:
         save(status, {"busy": True, "pid": os.getpid(), "started": dt.datetime.now().astimezone().isoformat(), "model": req["model"]})
     try:
-        r = main(req)
+        r = main_diagrams(req) if req.get("diagrams") else main(req)
         if status:
             save(status, {"done": True, "cost": r["cost"], "ms": r["ms"]})
         print(json.dumps({"cost": r["cost"], "model": r["model_id"], "ms": r["ms"]}))

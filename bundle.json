@@ -1,27 +1,27 @@
 {
   "goto": {
     "repo": "https://github.com/saefty/herdr-corgi-goto",
-    "tag": "v0.1.0",
-    "sha": "53d260093dc74fd312933f09be77e639c82d8633"
+    "tag": "v0.2.0",
+    "sha": "86f39f6a791dfa940a6fd228b20389fb93e4a202"
   },
   "pr-review": {
     "repo": "https://github.com/saefty/herdr-corgi-pr-review",
-    "tag": "v0.3.0",
-    "sha": "7d5e5f920c5920fcb00a51640c86bc0703177b8f"
+    "tag": "v0.4.0",
+    "sha": "53ff16a62b905ef585cf16dfd64153bdffd582f0"
   },
   "chatbar": {
     "repo": "https://github.com/saefty/herdr-corgi-chatbar",
-    "tag": "v0.1.0",
-    "sha": "ded4532cea7bcd5f496a7924a698ce254b4d2445"
+    "tag": "v0.2.0",
+    "sha": "e33a119bebc1c82462dee9f29ab02958373d1173"
   },
   "timetrack": {
     "repo": "https://github.com/saefty/herdr-corgi-timetrack",
-    "tag": "v0.1.0",
-    "sha": "ef55628c61d12a8c2437ee1c3684e1607d149864"
+    "tag": "v0.2.0",
+    "sha": "7e4fff8165c92c0c4b54ae921ca1e8146ca5a667"
   },
   "dictate": {
     "repo": "https://github.com/saefty/herdr-corgi-dictate",
-    "tag": "v0.1.0",
-    "sha": "81b3c0992472fced18c685bc10b293fbc030581d"
+    "tag": "v0.2.0",
+    "sha": "63b4a1b0e4a94a06bce6a42469ad36694875ce71"
   }
 }

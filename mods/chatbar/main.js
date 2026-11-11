@@ -343,7 +343,7 @@ export default class Chatbar extends View {
     const pic = icon(a.program, small ? 14 : 18, t.foreground);
     return div().id(`head-${a.address}`).relative().size(size).flex_none().rounded_full()
       .bg(t.raised).when(!p.total, (el) => el.border_2().border_color(t[a.status] ?? t.done))
-      .flex().items_center().justify_center().cursor_pointer().opacity(acc.hidden ? 0.45 : 1)
+      .flex().items_center().justify_center().cursor_pointer().accessibility_label(`Open chat with ${acc.title}`).opacity(acc.hidden ? 0.45 : 1)
       .hover((s) => s.bg(t.hover))
       .tooltip([acc.title, a.space_name, acc.label, STATUS[a.status] ?? a.status, progressLine(p),
         a.status === "working" ? p.doing : null].filter(Boolean).join(" · "))
@@ -368,17 +368,17 @@ export default class Chatbar extends View {
 
     const hdrBtn = (id, label, tip, fn) => div().id(id).w(24).h(24).flex_none().rounded(6)
       .flex().items_center().justify_center().text_size(14).cursor_pointer()
-      .hover((s) => s.bg(t.background).text_color(t.foreground)).tooltip(tip).on_click(fn).child(label);
+      .hover((s) => s.bg(t.background).text_color(t.foreground)).tooltip(tip).accessibility_label(tip).on_click(fn).child(label);
 
     const header = h_flex().h(42).px(10).gap(8).items_center().bg(color).text_color(t.background)
-      .child(h_flex().id(`hd-${addr}`).flex_1().min_w(0).gap(8).items_center().cursor_pointer()
+      .child(h_flex().id(`hd-${addr}`).flex_1().min_w(0).gap(8).items_center().cursor_pointer().tooltip(min ? "Open this chat." : "Minimize this chat.")
         .on_click((_e, cx) => {
           if (min) { this.min.delete(addr); delete this.screens[addr]; } else this.min.add(addr);
           cx.notify();
         })
         .child(p.total > 0
           ? div().id(`ring-${addr}`).flex_none().tooltip(progressLine(p)).child(ring(14, p.done / p.total, t.background + "55", t.background, 2.5))
-          : div().size(9).flex_none().rounded_full().border_1().border_color(t.background).bg(t[a.status] ?? t.done))
+          : div().id(`dot-${addr}`).size(9).flex_none().rounded_full().tooltip(`Agent status: ${a.status}.`).accessibility_label(`Agent status: ${a.status}`).border_1().border_color(t.background).bg(t[a.status] ?? t.done))
         .child(icon(a.program, 16, t.background))
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().text_size(13.5).font_semibold().child(acc.title))
@@ -427,7 +427,7 @@ export default class Chatbar extends View {
       .when(options.length > 0, (el) => el.child(v_flex().px(8).pt(8).gap(4).children(options.map((o) =>
         h_flex().id(`opt-${addr}-${o.key}`).h(28).px(10).gap(8).items_center().rounded(7)
           .border_1().border_color(t.input).bg(t.raised).text_size(12.5).text_color(t.foreground).cursor_pointer()
-          .hover((s) => s.bg(t.hover).border_color(color))
+          .hover((s) => s.bg(t.hover).border_color(color)).tooltip(`Answer the agent with option ${o.key}.`)
           .on_click((_e, cx) => this.send(addr, ["keys", addr, o.key], `option ${o.key}`, cx))
           .child(div().flex_none().font_semibold().text_color(color).child(o.key))
           .child(div().flex_1().min_w(0).truncate().child(o.label))))))
@@ -437,13 +437,13 @@ export default class Chatbar extends View {
           .border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground)))
         .child(this.mic(t, addr)))
       .child(h_flex().h(36).px(8).gap(6).items_center().justify_end()
-        .child(this.action(t, `term-${addr}`, "Open terminal", () => this.openTerminal(addr)))
+        .child(this.action(t, `term-${addr}`, "Open terminal", () => this.openTerminal(addr), "Open this agent's terminal."))
         .child(this.action(t, `go-${addr}`, "Go to", () => {
           // A context hook that listens here switches context first (e.g. a hidden one), then focuses.
           const g = goTo(addr, acc.context, this.hook, shared("layout"), Date.now());
           if (g.request) setShared(g.request.key, g.request.value);
           for (const [name, args] of g.run) run(name, args);
-        })));
+        }, "Jump to this agent's tab and focus it.")));
 
     return v_flex().id(`box-${addr}`).w(W).flex_none().rounded(10).overflow_hidden()
       .border_1().border_color(t.border).bg(t.popover).opacity(acc.hidden ? 0.5 : 1)
@@ -467,7 +467,7 @@ export default class Chatbar extends View {
     const tip = !api.ready ? api.hint ?? "Dictation isn't set up"
       : mine === "recording" ? "Stop and transcribe" : mine === "transcribing" ? "Transcribing…" : "Dictate a reply (click again to stop)";
     return div().id(`mic-${addr}`).size(30).flex_none().rounded_full().flex().items_center().justify_center()
-      .border_1().border_color(mine === "recording" ? t.blocked : t.input).cursor_pointer().tooltip(tip)
+      .border_1().border_color(mine === "recording" ? t.blocked : t.input).cursor_pointer().tooltip(tip).accessibility_label(tip)
       .hover((s) => s.bg(t.hover))
       .on_click(() => this.dictate(addr))
       .child(mine === "recording" ? div().size(10).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1000 })
@@ -475,8 +475,8 @@ export default class Chatbar extends View {
         : svg("mods/chatbar/mic.svg").size(15).text_color(api.ready ? t.muted : t.dim));
   }
 
-  action(t, id, label, fn) {
+  action(t, id, label, fn, tip) {
     return div().id(id).h(26).px(10).rounded(6).flex().items_center().text_size(12.5).text_color(t.muted).cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => fn()).child(label);
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click(() => fn()).child(label);
   }
 }

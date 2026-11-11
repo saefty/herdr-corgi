@@ -18,6 +18,7 @@ const SCAN_EVERY = 10 * 60000, SCAN_MAX = 600, REMOTE_MAX = 200, REMOTE_TTL = 24
 const DEFAULTS = { roots: ["~/code", "~/src", "~/projects", "~/dev"], depth: 4, cloneTo: { default: "~/code" } };
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
 const STATUS = { blocked: ["needs you", "blocked"], done: ["finished", "done"], working: ["working", "working"], idle: ["idle", "dim"] };
+const KIND_TIP = { agent: "Jump to this agent session.", terminal: "Jump to this terminal.", tab: "Jump to this tab.", space: "Switch to this space.", command: "Run this command.", layout: "Switch to this layout.", url: "Open this link in your browser.", pr: "Open this pull request.", repo: "Open this repository.", start: "Start a new agent session.", new: "Open this folder as a new space.", clone: "Clone this repository and open it as a space.", handler: "Run this action.", ask: "Ask an agent to find the matching session." };
 const TITLES = { "app.palette": "Command palette", "app.settings": "Settings", "app.help": "Keys" };
 
 const configFile = () => `${appHome()}/goto.config.json`;
@@ -565,10 +566,10 @@ export default class Goto extends View {
 
   // ---- view ----
 
-  glyph(t, r) {
+  glyph(t, r, i) {
     if (r.spin || r.doc?.status === "working") return svg(ICON("spinner")).size(14).flex_none().text_color(t.working).spin(900);
     const st = r.doc?.status;
-    if (st && STATUS[st]) return div().w(14).flex_none().text_color(t[STATUS[st][1]]).child(st === "idle" ? "○" : "●");
+    if (st && STATUS[st]) return div().id(`gt-${i}-dot`).w(14).flex_none().text_color(t[STATUS[st][1]]).child(st === "idle" ? "○" : "●").tooltip(`Session status: ${STATUS[st][0]}.`).accessibility_label(`Session status: ${STATUS[st][0]}`);
     const p = r.doc?.program;
     if (p?.icon && (r.kind === "agent" || r.kind === "terminal")) return p.tint ? svg(p.icon).size(14).flex_none().text_color(t.muted) : image(p.icon).w(14).h(14).flex_none();
     const icon = r.icon ?? r.doc?.icon ?? { space: ICON("folder"), tab: ICON("square"), terminal: ICON("terminal"), agent: ICON("terminal"), command: "frame/palette/command.svg", layout: ICON("layers"), item: ICON("layers") }[r.kind];
@@ -598,16 +599,16 @@ export default class Goto extends View {
     // The tag: the entry's own, else the hook's label for its context.
     const tag = r.tag ?? (r.context ? h?.labels?.[r.context] ?? r.context : null);
     const tagColor = r.context && h?.colors?.[r.context];
-    return h_flex().id(`gt-${i}`).mx(6).px(10).gap(10).items_center().rounded(7).cursor_pointer().text_size(12.8)
+    return h_flex().id(`gt-${i}`).mx(6).px(10).gap(10).items_center().rounded(7).cursor_pointer().text_size(12.8).tooltip(KIND_TIP[r.kind] ?? "Run this result (Enter).")
       .when(on, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.at = i; this.go(r, cx); })
-      .child(this.glyph(t, r))
+      .child(this.glyph(t, r, i))
       .child(h_flex().flex_1().min_w(0).gap(8).items_center()
         .child(this.title(t, r.title, r.hits, on))
         .when(Boolean(r.sub), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(r.sub))))
-      .when(Boolean(st), (el) => el.child(div().flex_none().text_size(11).text_color(t[st[1]]).child(age ? `${st[0]} · ${age}` : st[0])))
-      .when(Boolean(r.key), (el) => el.child(h_flex().flex_none().gap(3).children(r.key.split(/-(?=.)/).map((k) => this.chip(t, k)))))
-      .when(Boolean(tag), (el) => el.child(this.chip(t, tag, tagColor ? t[tagColor] ?? tagColor : null)));
+      .when(Boolean(st), (el) => el.child(div().id(`gt-${i}-status`).flex_none().text_size(11).text_color(t[st[1]]).tooltip("Session status and time since it last changed.").child(age ? `${st[0]} · ${age}` : st[0])))
+      .when(Boolean(r.key), (el) => el.child(h_flex().id(`gt-${i}-key`).flex_none().gap(3).tooltip("Keyboard shortcut bound to this command.").accessibility_label(`Shortcut ${r.key}`).children(r.key.split(/-(?=.)/).map((k) => this.chip(t, k)))))
+      .when(Boolean(tag), (el) => el.child(this.chip(t, tag, tagColor ? t[tagColor] ?? tagColor : null).id(`gt-${i}-tag`).tooltip("Where this result comes from.")));
   }
 
   render(cx) {
@@ -658,7 +659,7 @@ export default class Goto extends View {
       .child(h_flex().h(36).flex_none().px(10).gap(10).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
         .child(svg(ICON("search")).size(16).text_color(t.dim))
         .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-        .child(div().text_size(11).text_color(t.dim).child(this.busy ?? "Esc")))
+        .child(div().id("goto-hint").text_size(11).text_color(t.dim).tooltip(this.busy ? "A background task is running." : "Press Esc to close the palette.").child(this.busy ?? "Esc")))
       .child(rows.length
         ? div().id("goto-rows").relative().mb(6).when(fixed, (el) => el.h(LIST_H).overflow_hidden())
           .on_scroll_wheel((e, cx) => {

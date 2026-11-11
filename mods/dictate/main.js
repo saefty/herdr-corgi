@@ -138,16 +138,16 @@ export default class Dictate extends View {
     const t = theme();
     const rec = this.status === "recording" || this.status === "starting";
     return h_flex().id("dictate").h(30).px(10).gap(8).items_center().text_size(12.5).text_color(t.foreground)
-      .child(rec ? div().size(9).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1000 })
-        : div().text_color(t.muted).frames(SPIN, 90))
-      .child(div().min_w(70).child(rec ? `Recording ${clock(Date.now() - this.since)}` : "Transcribing…"))
+      .child(rec ? div().id("dictate-dot").size(9).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1000 }).tooltip("Recording from your microphone.").accessibility_label("Recording")
+        : div().id("dictate-spin").text_color(t.muted).frames(SPIN, 90).tooltip("Turning your recording into text.").accessibility_label("Transcribing"))
+      .child(div().id("dictate-status").min_w(70).tooltip(rec ? "Time recorded so far." : "Transcribing your recording.").child(rec ? `Recording ${clock(Date.now() - this.since)}` : "Transcribing…"))
       .when(rec, (el) => el
         .child(this.button(t, "dictate-stop", "Stop", "Stop and transcribe (the dictation key does the same)", (cx) => this.stop(cx)))
         .child(this.button(t, "dictate-cancel", "✕", "Cancel: nothing is typed", (cx) => this.cancel(cx))));
   }
 
   button(t, id, label, tip, fn) {
-    return div().id(id).h(22).px(8).rounded(6).flex().items_center().text_color(t.muted).cursor_pointer().tooltip(tip)
+    return div().id(id).h(22).px(8).rounded(6).flex().items_center().text_color(t.muted).cursor_pointer().tooltip(tip).accessibility_label(tip)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       // A press the mod doesn't stop would drag the float.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())

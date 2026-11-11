@@ -6,8 +6,8 @@
   },
   "pr-review": {
     "repo": "https://github.com/saefty/herdr-corgi-pr-review",
-    "tag": "v0.4.0",
-    "sha": "53ff16a62b905ef585cf16dfd64153bdffd582f0"
+    "tag": "v0.5.0",
+    "sha": "4f42e74b3f1a3542e1e3351ec35b3a43948c6de3"
   },
   "chatbar": {
     "repo": "https://github.com/saefty/herdr-corgi-chatbar",
@@ -26,7 +26,7 @@
   },
   "resume": {
     "repo": "https://github.com/saefty/herdr-corgi-resume",
-    "tag": "v0.1.1",
-    "sha": "e6a1094ee47e917307c0a95020f745977a9dc02f"
+    "tag": "v0.2.0",
+    "sha": "33dc5e117ad03d500287a066b4b88e357808d7ed"
   }
 }

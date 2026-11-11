@@ -20,6 +20,7 @@ import { lookup, warm, contents, vscodeArgs, where, setTrusted } from "./defs.js
 import { diffRows, hunksOf, selection, uiLine, lineKey, rangeOf, MODELS, reviewRequest, mapReview, suspectComment, stepKey, fileRows, fileTree, atLine, splitPatch } from "./pr.js";
 import { ghTarget, lowValue, markReviewed, sinceBase, verifyCandidates, applyVerification, blastArch, preMergeChecks, mergeBlockers, triageOf } from "./pr.js";
 import { diffLines, inDiff, ghReview, lineThreads, suggestionBlock, buildReview, layoutPlan, specElements, diagramsState } from "./pr.js";
+import { wheelStep } from "./views.js";
 import { archView, archModel, archLegend, visualsCard, visualCard, statCard, segBar, foldCard, chip, legend, specTag, sourceLegend, SEVERITY_COLOR } from "./stack.js";
 import { hasSources, archLayout } from "./arch.js";
 import * as TH from "./threads.js";
@@ -834,8 +835,9 @@ export const ReviewMode = {
   fix(list, cx) {
     if (!list.length) return;
     const report = `${findDir()}/${hash(this.prSel.url)}.jsonl`;
-    this.previewFix(cx, { what: list.length === 1 ? "Fix" : `Fix (${list.length})`, own: list.map((f) => `${f.title} (${f.file}:${f.line})`).join("\n"), items: list.map((f) => ({ kind: "finding", id: f.id })),
-      prompt: (branch, path) => [fixPrompt(list, this.pr, report, this.lang()), branch ? TH.worktreeNote(branch, path) : null].filter(Boolean).join("\n\n"),
+    const labels = list.map((f) => `${f.title} (${f.file}:${f.line})`);
+    this.previewFix(cx, { what: list.length === 1 ? "Fix" : `Fix (${list.length})`, own: labels.join("\n"), items: list.map((f) => ({ kind: "finding", id: f.id })), labels,
+      prompt: (sub) => [fixPrompt(list, this.pr, report, this.lang()), sub ? TH.worktreeNote(sub.branch, sub.path, sub.head && sub.main) : null, sub ? TH.handoffNote(sub) : null].filter(Boolean).join("\n\n"),
       sent: (cx) => { for (const f of list) this.setFinding(f, "progress", cx, { fixHead: this.headNow() }); } });
   },
 
@@ -1306,15 +1308,16 @@ export const ReviewMode = {
   threadButtons(th, v = this.threadOfView(th)) {
     const fv = this.fixView(this.fixOf(th.id));
     const fix = !fv ? [{ label: "Fix…", act: (cx) => this.fixComments([th.id], cx) }]
-      : [...(fv.job.terminal ? [{ label: "Go to fix", act: () => this.goFix(fv.job) }] : []), ...(fv.commit && fv.job.target === "sub" ? [{ label: "Apply to PR", primary: true, act: (cx) => this.applyFix(fv.job, cx) }] : []),
+      : [...(fv.job.terminal ? [{ label: "Go to fix", act: () => this.goFix(fv.job) }] : []), ...(fv.commit && fv.job.target === "sub" ? [{ label: "Apply to PR", primary: !fv.handed, act: (cx) => this.applyFix(fv.job, cx) }] : []),
         ...(fv.job.target === "sub" ? [{ label: "Discard fix", act: (cx) => this.discardFix(fv.job, cx) }] : [])];
-    return [...fix, { label: "Reply", primary: !fv?.commit, act: (cx) => { this.replyTo = th.id; this.replyIn.set_value(""); cx.timer.after(0, () => this.replyIn.focus()); } },
+    return [...fix, { label: "Reply", primary: !fv?.commit || fv.handed, act: (cx) => { this.replyTo = th.id; this.replyIn.set_value(""); cx.timer.after(0, () => this.replyIn.focus()); } },
       ...(v.fixedIn || v.entries.some((e) => e.commit) ? [{ label: `Open ${String(v.fixedIn ?? [...v.entries].reverse().find((e) => e.commit).commit).slice(0, 7)}`, act: () => this.openCommit(v.fixedIn ?? [...v.entries].reverse().find((e) => e.commit).commit) }] : []),
       ...(th.url ? [{ label: "On GitHub ↗", act: () => openUrl(th.url) }] : []),
       ...(v.status === "fixed" ? [{ label: "Fold", act: () => this.openThreads.delete(th.id) }] : [])];
   },
   // ---- Fix: comments (pending or sent) and findings to a sub-agent in its own worktree (default) or the main agent,
-  // always through the preview; the sub-agent's branch is applied to the PR's checkout on "Apply to PR" (never pushed).
+  // always through the preview; the sub-agent never pushes: when done it hands its branch to the PR's agent (hc send),
+  // which cherry-picks, tests and pushes; without a live PR agent "Apply to PR" brings it to the PR's checkout.
 
   selected() { return TH.selectedOf(this.threadDoc, this.threadKey()); },
   toggleSel(id, cx) { const key = this.threadKey(); this.updateThreads(cx, (d) => TH.toggleSelected(d, key, id)); },
@@ -1323,11 +1326,12 @@ export const ReviewMode = {
   // The PR's own checkout the fix branch starts from and is applied to: the session's folder, the branch's repo, else
   // the review's checkout of the PR head.
   fixBase() { return this.prSel?.cwd ?? (this.prSel?.space ? this.root : null) ?? this.worktree?.path ?? null; },
-  // A job's state for its rows: running (with its agent's status), ready (a fixed report with a commit), main.
+  // A job's state for its rows: running (with its agent's status), ready (a fixed report with a commit), handed (ready
+  // and reported to the PR's agent), main.
   fixView(job) {
     const commit = job && TH.fixCommit(job, this.replies, this.find.reports);
     const agent = job?.terminal ? agents().find((a) => a.address === job.terminal) : null;
-    return job ? { job, commit, status: agent?.status ?? (job.target === "main" ? "main agent" : "ended") } : null;
+    return job ? { job, commit, handed: Boolean(commit && job.handoff), status: agent?.status ?? (job.target === "main" ? "main agent" : "ended") } : null;
   },
   // Comments by id: the pending ones and the sent threads.
   commentsById(ids) {
@@ -1338,33 +1342,40 @@ export const ReviewMode = {
     const comments = this.commentsById(ids);
     if (!comments.length) return;
     const items = comments.map((c) => ({ kind: "comment", id: c.id }));
-    const prompt = (branch, path) => TH.fixCommentsPrompt({ pr: this.pr, comments, file: this.repliesFile(), lang: this.lang(), branch, path });
+    const prompt = (sub) => TH.fixCommentsPrompt({ pr: this.pr, comments, file: this.repliesFile(), lang: this.lang(), ...sub });
     this.previewFix(cx, { what: comments.length === 1 ? "Fix" : `Fix ${comments.length}`, own: comments.map((c) => `${c.file} ${uiLine(c)}: ${c.text}`).join("\n\n"), items, prompt,
+      labels: comments.map((c) => `${c.file} ${uiLine(c)}: ${c.text}`),
       sent: (cx, how) => {
         const key = this.threadKey(), pending = TH.withIds(this.comments).filter((c) => ids.includes(c.id));
         if (pending.length) { this.comments = TH.withIds(this.comments).filter((c) => !ids.includes(c.id)); this.persist(cx); }
         this.updateThreads(cx, (d) => TH.clearSelected(TH.addThreads(d, key, pending, how)));
       } });
   },
-  // The preview with the target choice; prompt(branch, path) gives the text for a sub-agent (its worktree) or the main agent.
-  previewFix(cx, { what, own, items, prompt, sent }) {
-    const ids = items.map((x) => x.id), branch = TH.fixBranch(this.prSel?.number, ids), path = TH.fixPath(home(), this.prSel?.repo, branch);
-    const { label } = this.sendAgent();
-    this.previewSend(cx, { what, own, prompt: prompt(branch, path), onSent: (cx) => {
-      const job = { id: `${Date.now().toString(36)}`, items, target: "main", at: Date.now(), state: "running" };
-      this.updateThreads(cx, (d) => TH.addFix(d, this.threadKey(), job));
-      sent(cx, { route: "agent", agent: label });
-    } });
-    this.sendP.fix = { target: "sub", branch, path, items, prompt, sent };
+  // The preview with the target choice; prompt(sub) gives the text for a sub-agent (sub: {branch, path, head, main}: its
+  // worktree, the PR head it starts from, the PR agent it hands the fix to) or, with null, for the main agent. The head is
+  // read first so the text names the exact cherry-pick range.
+  previewFix(cx, { what, own, items, labels, prompt, sent }) {
+    const ids = items.map((x) => x.id), branch = TH.fixBranch(this.prSel?.number, ids), path = TH.fixPath(home(), this.prSel?.repo, branch), base = this.fixBase();
+    cx.spawn(async (cx) => {
+      const head = base ? (await exec("git", ["-C", base, "rev-parse", "HEAD"], { timeout: 20000 }).catch(() => null))?.stdout?.trim() || null : null;
+      const { agent, label } = this.sendAgent(), sub = { branch, path, head, main: agent?.address ?? null };
+      this.previewSend(cx, { what, own, prompt: prompt(sub), onSent: (cx) => {
+        const job = { id: `${Date.now().toString(36)}`, items, target: "main", at: Date.now(), state: "running" };
+        this.updateThreads(cx, (d) => TH.addFix(d, this.threadKey(), job));
+        sent(cx, { route: "agent", agent: label });
+      } });
+      this.sendP.fix = { target: "sub", ...sub, items, labels, prompt, sent };
+    });
   },
   // The target switch in the preview: the text follows (a sub-agent gets its worktree note).
   fixTarget(target) {
     const f = this.sendP?.fix;
     if (!f || f.target === target) return;
     f.target = target;
-    this.sendText.set_value(target === "sub" ? f.prompt(f.branch, f.path) : f.prompt(null, null));
+    this.sendText.set_value(f.prompt(target === "sub" ? f : null));
   },
-  // A new Claude as a sub-agent of the PR's agent, in a fresh worktree on the fix branch from the PR's checkout's HEAD.
+  // A new Claude as a sub-agent of the PR's agent, in a fresh worktree on the fix branch from the PR head the preview
+  // named; the PR's agent gets a short start notice (hc send; a busy Claude queues it), the sub-agent reports back itself.
   startSubFix(p, text, cx) {
     const f = p.fix, base = this.fixBase(), key = this.threadKey();
     if (!base) { this.note = "Not started: the PR has no local checkout to branch the fix from"; return cx.notify(); }
@@ -1372,7 +1383,7 @@ export const ReviewMode = {
     cx.spawn(async (cx) => {
       try {
         const git = (args) => exec("git", ["-C", base, ...args], { timeout: 60000 });
-        const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+        const head = f.head ?? (await git(["rev-parse", "HEAD"])).stdout.trim();
         if (!head) throw new Error(`${base} is not a git checkout`);
         await exec("mkdir", ["-p", f.path.replace(/\/[^/]+$/, "")]).catch(() => null);
         const w = await git(["worktree", "add", "-b", f.branch, f.path, head]);
@@ -1380,17 +1391,19 @@ export const ReviewMode = {
         const id = Date.now().toString(36), { agent } = this.sendAgent();
         const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id }));
         if (r.code !== 0) { await git(["worktree", "remove", "--force", f.path]); await git(["branch", "-D", f.branch]); throw new Error((r.stderr || r.stdout).trim().slice(0, 200)); }
-        const terminal = JSON.parse(r.stdout).address;
-        this.updateThreads(cx, (d) => TH.addFix(d, key, { id, branch: f.branch, path: f.path, base, head, items: f.items, terminal, target: "sub", at: Date.now(), state: "running" }));
+        const terminal = JSON.parse(r.stdout).address, handoff = f.main && text.includes(`hc send ${f.main} `) ? f.main : null; // the text may have been edited
+        this.updateThreads(cx, (d) => TH.addFix(d, key, { id, branch: f.branch, path: f.path, base, head, items: f.items, terminal, target: "sub", handoff, at: Date.now(), state: "running" }));
         f.sent(cx, { route: "agent", agent: `Fix sub-agent · ${f.branch}` });
-        this.note = `Fix started: a sub-agent works on ${f.branch} in its own worktree`;
+        const told = handoff && (await hc(["send", handoff, TH.startNotice({ pr: this.pr, branch: f.branch, path: f.path, terminal, labels: f.labels ?? [] })]).catch(() => null))?.code === 0;
+        this.note = `Fix started: a sub-agent works on ${f.branch} in its own worktree${handoff ? `; it hands the fix to the PR's agent when done${told ? "" : " (the start notice did not go through)"}` : ""}`;
       } catch (e) { this.note = `Not started: ${String(e).replace(/^Error: /, "")}`; }
       finally { this.sending = false; cx.notify(); }
     });
   },
   goFix(job) { if (job?.terminal) run("terminal.peek", { terminal: job.terminal }); },
-  // Apply to PR: the branch's commits cherry-picked onto the PR's checkout, only when it is clean (else the main agent
-  // can do it, through the preview); then the worktree and branch go. Nothing is pushed.
+  // Apply to PR (secondary once the sub-agent handed the fix to the PR's agent): the branch's commits cherry-picked onto
+  // the PR's checkout, only when it is clean (else the main agent can do it, through the preview); then the worktree and
+  // branch go. Nothing is pushed here.
   applyFix(job, cx) {
     const key = this.threadKey(), git = (args) => exec("git", ["-C", job.base, ...args], { timeout: 120000 });
     cx.spawn(async (cx) => {
@@ -1464,15 +1477,15 @@ export const ReviewMode = {
     }
     if (it.k === "th") {
       const v = this.threadOfView(o), fv = this.fixView(this.fixOf(o.id)), agent = o.agent?.split(" · ")[0] || "Agent";
-      const status = fv?.commit ? ["Fix ready", "ansi2"] : fv ? [`Fixing · ${fv.status}`, "ansi3"] : v.status === "fixed" ? [`Fixed${v.fixedIn ? ` in ${v.fixedIn.slice(0, 7)}` : ""}`, "ansi2"]
+      const status = fv?.handed ? ["Handed to PR agent", "ansi2"] : fv?.commit ? ["Fix ready", "ansi2"] : fv ? [`Fixing · ${fv.status}`, "ansi3"] : v.status === "fixed" ? [`Fixed${v.fixedIn ? ` in ${v.fixedIn.slice(0, 7)}` : ""}`, "ansi2"]
         : v.status === "wontfix" ? ["Declined", "muted"] : v.status === "answered" || v.status === "question" ? ["Agent replied", "accent"]
         : o.route === "github" ? [o.dry ? "Dry run: not posted" : "Posted", "ansi4"] : ["Sent to agent", "ansi6"];
-      const action = fv?.commit && fv.job.target === "sub" ? ["Apply to PR", (cx) => this.applyFix(fv.job, cx)] : fv ? ["Go to fix", () => this.goFix(fv.job)] : ["Fix", (cx) => this.fixComments([o.id], cx)];
+      const action = fv?.commit && fv.job.target === "sub" && !fv.handed ? ["Apply to PR", (cx) => this.applyFix(fv.job, cx)] : fv ? ["Go to fix", () => this.goFix(fv.job)] : ["Fix", (cx) => this.fixComments([o.id], cx)];
       return { key: `th:${o.id}`, id: o.id, src: "mine", author: "You", time: hm(o.sentAt), sel: true, status, text: o.text, action,
         folded: v.collapsed ? `You: ${plain(o.text)} · ${status[0]}` : null,
         replies: v.entries.filter((e) => this.show().agents || e.who !== "agent").map((e) => ({ author: e.who === "you" ? "You" : e.who === "agent" ? agent : e.who, src: e.who === "you" ? "mine" : e.who === "agent" ? "agents" : "github",
           text: e.text, status: e.status ? [{ fixed: `Fixed${e.commit ? ` in ${String(e.commit).slice(0, 7)}` : ""}`, wontfix: "Declined", answered: "Answered", question: "Question" }[e.status] ?? e.status, THREAD_COLOR[e.status] ?? "muted"] : null })),
-        menu: [["Reply", false, (cx) => this.startReply(o.id, cx)], ...(fv?.job.terminal ? [["Go to fix", false, () => this.goFix(fv.job)]] : []),
+        menu: [["Reply", false, (cx) => this.startReply(o.id, cx)], ...(fv?.job.terminal ? [["Go to fix", false, () => this.goFix(fv.job)]] : []), ...(fv?.handed && fv.job.target === "sub" ? [["Apply to PR", false, (cx) => this.applyFix(fv.job, cx)]] : []),
           ...(fv?.job.target === "sub" ? [["Discard fix", true, (cx) => this.discardFix(fv.job, cx)]] : []), ...(v.status === "fixed" || v.status === "wontfix" ? [[this.openThreads.has(o.id) ? "Fold" : "Unfold", false, () => { if (this.openThreads.has(o.id)) this.openThreads.delete(o.id); else this.openThreads.add(o.id); }]] : []),
           ["Select", false, (cx) => this.toggleSel(o.id, cx)], ...(o.url ? [["Open on GitHub", false, () => openUrl(o.url)]] : []), ["Copy position", false, () => copyText(where(o))]] };
     }
@@ -1522,7 +1535,7 @@ export const ReviewMode = {
         .child(avatar(c.author, c.src)).child(div().flex_none().font_semibold().text_color(c.src === "notes" ? t.ansi5 : t.foreground).child(c.author))
         .child(div().flex_none().text_color(t.muted).child(c.time)).child(pillC(c.status).id(`rv-chs-${c.key}`).tooltip(`Where this comment stands: ${c.status[0]}`))
         .child(div().flex_1())
-        .when(Boolean(c.action), (e) => e.child(div().id(`rv-cha-${c.key}`).tooltip(c.action[0] === "Fix" ? "Fix this with an agent: a preview first; a sub-agent never pushes" : c.action[0] === "Apply to PR" ? "Cherry-pick the fix onto the PR's checkout; nothing is pushed" : c.action[0] === "Go to fix" ? "Show the fix agent's terminal" : "Turn this note into a pending comment").accessibility_label(c.action[0]).w(z.action[1] - z.action[0]).h(22).flex_none().flex().items_center().justify_center().gap(4).rounded(5)
+        .when(Boolean(c.action), (e) => e.child(div().id(`rv-cha-${c.key}`).tooltip(c.action[0] === "Fix" ? "Fix this with an agent: a preview first; a sub-agent never pushes, the PR's agent takes the fix over and pushes" : c.action[0] === "Apply to PR" ? "Cherry-pick the fix onto the PR's checkout; nothing is pushed" : c.action[0] === "Go to fix" ? "Show the fix agent's terminal" : "Turn this note into a pending comment").accessibility_label(c.action[0]).w(z.action[1] - z.action[0]).h(22).flex_none().flex().items_center().justify_center().gap(4).rounded(5)
           .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child(c.action[0] === "Fix" ? "✦ Fix" : c.action[0])))
         .child(div().id(`rv-chm-${c.key}`).tooltip("More actions for this comment").accessibility_label("More actions").w(24).h(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child("⋯"))));
     }
@@ -1855,10 +1868,10 @@ export const ReviewMode = {
       .child(h_flex().items_center().child(div().flex_1().font_semibold().text_size(14).child(p.fix ? `${p.what}: preview` : `${p.what}: send to agent`))
         .child(pill("rv-send-x", t, "✕", (_e, cx) => { this.sendP = null; this.fh.focus(); cx.notify(); }).tooltip("Close the preview without sending").accessibility_label("Close")))
       .when(Boolean(p.fix), (e) => e.child(h_flex().gap(6).items_center().text_size(12.5).child(div().text_color(t.muted).child("Fix with"))
-        .child(pill("rv-fix-sub", t, "Sub-agent (default)", (_e, cx) => { this.fixTarget("sub"); cx.notify(); }, p.fix.target === "sub").tooltip("A new agent fixes this in its own git worktree and never pushes"))
+        .child(pill("rv-fix-sub", t, "Sub-agent (default)", (_e, cx) => { this.fixTarget("sub"); cx.notify(); }, p.fix.target === "sub").tooltip("A new agent fixes this in its own git worktree and never pushes; when done it hands the fix to the PR's agent, which pushes"))
         .child(pill("rv-fix-main", t, "Main agent", (_e, cx) => { this.fixTarget("main"); cx.notify(); }, p.fix.target === "main").tooltip("Send the fix prompt to the PR's own agent session"))))
       .child(h_flex().gap(6).items_center().text_size(12.5).child(div().text_color(t.muted).child("To")).child(div().flex_1().min_w(0).whitespace_normal().font_semibold()
-        .child(p.fix?.target === "sub" ? `a new Claude${this.sendAgent().agent ? `, a sub-agent of ${p.agent.split(" · ")[0]},` : " (no live PR agent to put it under)"} in its own worktree on ${p.fix.branch}` : p.agent)))
+        .child(p.fix?.target === "sub" ? `a new Claude${this.sendAgent().agent ? `, a sub-agent of ${p.agent.split(" · ")[0]},` : " (no live PR agent to put it under)"} in its own worktree on ${p.fix.branch}${p.fix.main && p.fix.head ? "; it hands the fix to the PR's agent when done" : ""}` : p.agent)))
       .when(Boolean(p.own), (e) => e.child(v_flex().gap(4).child(div().text_size(11.5).font_semibold().text_color(t.muted).child("YOUR WORDS"))
         .child(div().max_h(110).overflow_hidden().p(8).rounded(6).border_l(3).border_color(t.accent).bg(t.surface).text_size(12.5).line_height(1.45).whitespace_normal().child(p.own))))
       .child(div().text_size(11.5).font_semibold().text_color(t.muted).child("EXACT TEXT SENT · your words plus generated instructions, editable"))
@@ -1931,7 +1944,7 @@ export const ReviewMode = {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(div().flex_none().text_size(13).font_semibold().child(`${n} selected`))
       .child(div().w(1).h(18).flex_none().bg(t.border))
-      .child(div().id("rv-selfix").tooltip("Fix the selected comments with an agent; you see a preview first and nothing is pushed").flex_none().px(14).h(28).flex().items_center().rounded_full().bg(t.accent).text_color(t.accent_foreground).text_size(13).font_semibold().cursor_pointer()
+      .child(div().id("rv-selfix").tooltip("Fix the selected comments with an agent; a preview first, then the PR's agent takes the fix over and pushes").flex_none().px(14).h(28).flex().items_center().rounded_full().bg(t.accent).text_color(t.accent_foreground).text_size(13).font_semibold().cursor_pointer()
         .on_click((_e, cx) => this.fixComments(this.selected(), cx)).child(`✦ Fix selected (${n})`))
       .child(div().flex_1())
       .child(div().id("rv-selx").w(28).h(28).flex_none().flex().items_center().justify_center().rounded_full().text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -1969,7 +1982,7 @@ export const ReviewMode = {
       .when(Boolean(pr), (e) => e.child(div().id("rv-bar-repo").tooltip("Repository and PR number").flex_none().text_size(12).text_color(t.muted).child(`${pr.repo ?? ""}#${pr.number ?? ""}`))
         .child(badge(t, pr.state ?? "?", t[{ open: "ansi2", draft: "dim", merged: "ansi5", closed: "ansi1" }[pr.state]] ?? t.dim).id("rv-bar-state").tooltip("The PR's state on GitHub"))
         .when(C.tagged(ctxDoc()), (e) => e.child(badge(t, C.labelOf(ctxDoc(), prCtx(pr)), C.colorOf(ctxDoc(), prCtx(pr), t)).id("rv-bar-ctx").tooltip("The context this PR belongs to"))))
-      .when(selected > 0, (e) => e.child(div().id("rv-bar-fixsel").tooltip("Fix the selected comments with an agent; you see a preview first and nothing is pushed").flex_none().px(14).h(32).flex().items_center().rounded(7).bg(t.accent).text_color(t.accent_foreground)
+      .when(selected > 0, (e) => e.child(div().id("rv-bar-fixsel").tooltip("Fix the selected comments with an agent; a preview first, then the PR's agent takes the fix over and pushes").flex_none().px(14).h(32).flex().items_center().rounded(7).bg(t.accent).text_color(t.accent_foreground)
         .text_size(13).font_semibold().cursor_pointer().on_mouse_down("left", stop).on_click(() => run("pr-review.fix")).child(`✦ Fix selected (${selected})`)))
       // Until a reviewer ran, the deep review is the button to find: green, like Finish your review.
       .child(runs.some((r) => r.at || r.busy) ? pill("rv-reviews-btn", t, runLabel, openRuns).tooltip("Run Claude or security reviews of this PR, read-only; see each run's status").flex_none()
@@ -2035,7 +2048,7 @@ export const ReviewMode = {
           .child(div().flex_none().text_color(t.accent).child("?"))
           .child(div().flex_1().min_w(0).child(TextView.markdown(`rv-q-${stepKey(s)}-${k}`, this.asked(s, q))))))))
       .when(on && s.visuals?.length > 0, (e) => e.child(div().pl(26).child(this.diagramsBar(t, `rv-dia-${i}`, "Refresh this view"))).child(div().pl(26).child(visualsCard(s.visuals, t, `rv-vis-${i}`, (at, cx) => this.jumpTo(at, cx),
-        this.visTab?.[i] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [i]: k }; cx.notify(); }))))
+        this.visTab?.[i] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [i]: k }; cx.notify(); }, this.wrapX()))))
       .when(on && !s.pseudo && Boolean(this.ai), (e) => e.child(h_flex().pl(26).gap(6).child(pill(`rv-ask-l${i}`, t, "Ask about this layer", (_e, cx) => {
         const k = (this.ai?.steps ?? []).indexOf(s); this.setDrawer("open", cx, k >= 0 ? { layer: k } : null); cx.stop_propagation(); }).tooltip("Ask one model question about this layer; the answer stays private"))
         .child(pill(`rv-drill-l${i}`, t, "Show details", (_e, cx) => { this.showDetails(this.layerSubject(s), `layer:${stepKey(s)}`, cx); cx.stop_propagation(); }).tooltip("One model call breaks this layer down further")))
@@ -2282,15 +2295,11 @@ export const ReviewMode = {
     const a = this.ai?.arch;
     const seg = (k, label) => div().id(`rv-av-${k}`).tooltip((k === "diff" ? "What changed in the architecture" : k === "before" ? "The architecture before this PR" : "The architecture after this PR")).px(10).h(24).flex().items_center().rounded(5).cursor_pointer().text_size(12.5)
       .bg(this.archMode === k ? t.selected : t.chrome).text_color(this.archMode === k ? t.foreground : t.muted).on_click((_e, cx) => { this.archMode = k; cx.notify(); }).child(label);
-    const more = () => visualsCard(this.ai.visuals, t, "rv-arch-vis", (at, cx) => this.jumpTo(at, cx), this.archVisTab ?? 0, (k, cx) => { this.archVisTab = k; cx.notify(); });
+    const more = () => visualsCard(this.ai.visuals, t, "rv-arch-vis", (at, cx) => this.jumpTo(at, cx), this.archVisTab ?? 0, (k, cx) => { this.archVisTab = k; cx.notify(); }, this.wrapX());
     if (!a) return v_flex().gap(12).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams")).child(div().text_size(13.5).text_color(t.muted).child(this.ai ? "This analysis has no architecture picture (older analysis, or the PR touches no architecture). Re-analyze for one." : "No analysis yet: Analyze in the left column."))
       .when(this.ai?.visuals?.length > 0, (e) => e.child(div().max_w(760).child(more())));
     const groups = new Set(a.nodes.map((n) => n.group)).size, L = this.archL(), fit = this.archFitOn();
     const opts = this.archOpts("arch");
-    // The canvas scrolls sideways by itself (archWheel, a bar under it, drag to pan): clipped at its own box, 40 px of
-    // room after the last column.
-    const viewW = this.archViewW ?? 800, contentW = L.width + 4 + 40, maxX = Math.max(0, contentW - viewW), x = Math.min(this.archX ?? 0, maxX);
-    this.archGeom = { maxX, contentW, viewW };
     return v_flex().gap(12)
       .child(h_flex().gap(12).items_center().flex_wrap().child(div().text_size(20).font_semibold().child("Architecture impact")).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams"))
         .when(this.drawerState() !== "open", (e) => e.child(pill("rv-ask-open", t, "Ask", (_e, cx) => this.setDrawer("open", cx, null)).tooltip("Ask one model question about the architecture picture")))
@@ -2302,15 +2311,9 @@ export const ReviewMode = {
         .when(hasSources(a) || (this.ai.visuals ?? []).some(hasSources), (e) => e.child(div().flex_none().child(sourceLegend(t))))
         .child(h_flex().flex_none().gap(2).p(2).rounded(7).border_1().border_color(t.border).child(seg("diff", "Structural diff")).child(seg("before", "Before")).child(seg("after", "After")))
         .child(div().id("rv-av-fit").flex_none().px(10).h(28).flex().items_center().rounded(7).border_1().border_color(fit ? t.accent : t.border).cursor_pointer().text_size(12.5)
-          .text_color(fit ? t.foreground : t.muted).tooltip("Narrow cards, so a wide picture fits the view").on_click((_e, cx) => { this.archFit = !fit; this.archX = 0; cx.notify(); }).child("Fit")))
-      .child(div().id("rv-arch-canvas").w_full().h(L.height + 4).relative().overflow_hidden().when(maxX > 0, (e) => e.cursor_grab())
-        .on_size_change((size, cx) => { if (Math.abs((this.archViewW ?? 0) - size.width) > 2) { this.archViewW = size.width; cx.notify(); } })
-        .on_scroll_wheel((e, cx) => this.archWheel(e, cx))
-        .on_mouse_down("left", (e) => { if (maxX > 0) this.archPan = { x0: e.position.x, from: x }; })
-        .child(div().absolute().top(0).left(-x).w(contentW).h(L.height + 4).child(archView(L, t, "rv-arch", (n, _e, cx) => this.jumpTo(n.at, cx), null, opts)).children(this.pinNotes(t, L))))
-      .when(maxX > 0, (e) => e.child(div().id("rv-arch-hbar").tooltip("Scroll bar for the picture").w_full().h(10).relative().rounded(5).bg(t.raised)
-        .child(div().id("rv-arch-thumb").tooltip("Drag to scroll the picture sideways").absolute().top(1).left(Math.round((x / contentW) * viewW)).w(Math.max(30, Math.round((viewW * viewW) / contentW))).h(8).rounded(4).bg(t.muted).cursor_pointer()
-          .on_mouse_down("left", (ev, cx) => { this.archThumb = { x0: ev.position.x, from: x }; cx.stop_propagation(); }))))
+          .text_color(fit ? t.foreground : t.muted).tooltip("Narrow cards, so a wide picture fits the view").on_click((_e, cx) => { this.archFit = !fit; this.hsOf("rv-arch-canvas").x = 0; cx.notify(); }).child("Fit")))
+      // 40 px of room after the last column.
+      .child(this.hscroll("rv-arch-canvas", L.width + 4 + 40, L.height + 4, [archView(L, t, "rv-arch", (n, _e, cx) => this.jumpTo(n.at, cx), null, opts), ...this.pinNotes(t, L)], t))
       .child(this.drillPanel(t, "arch"))
       .child(archLegend(L, t, "rv-arch-edges", "Edges", opts))
       .when(this.ai?.visuals?.length > 0, (e) => e.child(div().pt(6).text_size(13).font_semibold().text_color(t.muted).child("More views"))
@@ -2321,7 +2324,7 @@ export const ReviewMode = {
   archFitOn() {
     if (this.archFit !== undefined) return this.archFit;
     const a = this.ai?.arch;
-    return Boolean(a) && archModel(a, this.archMode).width > 1.3 * (this.archViewW ?? 1e9); // auto: much wider than the view
+    return Boolean(a) && archModel(a, this.archMode).width > 1.3 * (this.hs?.get("rv-arch-canvas")?.viewW || 1e9); // auto: much wider than the view
   },
   archL() {
     const a = this.ai?.arch;
@@ -2330,18 +2333,37 @@ export const ReviewMode = {
     if (this.fitMemo?.key !== key) this.fitMemo = { key, L: archLayout(a, this.archMode, () => 0, true) };
     return this.fitMemo.L;
   },
-  // Wheel and trackpad over the picture: each gesture keeps the axis it starts with (mostly sideways: only the canvas
-  // moves, the page stays; mostly down: the page scrolls). A gesture ends after 150 ms without a wheel event.
-  archWheel(e, cx) {
-    const g = this.archGeom, now = Date.now(), dx = e.delta?.x ?? 0, dy = e.delta?.y ?? 0;
-    if (!g || g.maxX <= 0) return;
-    if (e.touch_phase === "started" || now - (this.wheelAt ?? 0) > 150) this.wheelAxis = null;
-    this.wheelAt = now;
-    if (!this.wheelAxis && (dx || dy)) this.wheelAxis = Math.abs(dx) > Math.abs(dy) || e.modifiers?.shift ? "x" : "y";
-    if (this.wheelAxis !== "x") return;
-    const d = dx || (e.modifiers?.shift ? dy : 0);
-    this.archX = Math.max(0, Math.min(g.maxX, (this.archX ?? 0) - d));
-    cx.stop_propagation(); cx.notify();
+  // ---- sideways scrollers inside the scrolling page (the architecture canvas, the flow, state-machine and blast
+  // pictures): clipped at their box, the content moved by left(-x); wheel and trackpad through wheelStep (one axis per
+  // gesture, so page and picture never move together; shift+wheel sideways), drag to pan, a thumb bar when wider than
+  // the view. Per id in this.hs: {x, viewW, maxX, contentW}; one gesture (this.gesture) and one drag (this.hsDrag).
+  hsOf(id) { const m = (this.hs ??= new Map()); if (!m.has(id)) m.set(id, { x: 0, viewW: 0, maxX: 0, contentW: 0 }); return m.get(id); },
+  wrapX() { return (this.wrapXFn ??= (id, w, h, el) => this.hscroll(id, w, h, el)); }, // stack.js visualsCard's wrapX
+  hscroll(id, contentW, h, content, t = theme()) {
+    const s = this.hsOf(id), viewW = s.viewW || 800, maxX = Math.max(0, contentW - viewW), x = Math.min(s.x, maxX);
+    s.maxX = maxX; s.contentW = contentW; // for the wheel and drag handlers
+    return v_flex().w_full().gap(4)
+      .child(div().id(id).w_full().h(h).relative().overflow_hidden().when(maxX > 0, (e) => e.cursor_grab())
+        .on_size_change((size, cx) => { if (Math.abs(s.viewW - size.width) > 2) { s.viewW = size.width; cx.notify(); } })
+        .on_scroll_wheel((e, cx) => this.hsWheel(id, e, cx))
+        .on_mouse_down("left", (e) => { if (maxX > 0) this.hsDrag = { id, x0: e.position.x, from: x }; })
+        .child(div().absolute().top(0).left(-x).w(contentW).h(h).children([].concat(content))))
+      .when(maxX > 0, (e) => e.child(div().id(`${id}-hbar`).tooltip("Scroll bar for the picture").w_full().h(10).relative().rounded(5).bg(t.raised)
+        .child(div().id(`${id}-thumb`).tooltip("Drag to scroll the picture sideways").absolute().top(1).left(Math.round((x / contentW) * viewW)).w(Math.max(30, Math.round((viewW * viewW) / contentW))).h(8).rounded(4).bg(t.muted).cursor_pointer()
+          .on_mouse_down("left", (ev, cx) => { this.hsDrag = { id, x0: ev.position.x, from: x, thumb: true }; cx.stop_propagation(); }))));
+  },
+  hsWheel(id, e, cx) {
+    const s = this.hsOf(id), r = wheelStep(this.gesture, { dx: e.delta?.x ?? 0, dy: e.delta?.y ?? 0, t: Date.now(), phase: e.touch_phase, shift: Boolean(e.modifiers?.shift) }, s.x, s.maxX);
+    this.gesture = r.g;
+    if (!r.used) return;
+    s.x = r.x; cx.stop_propagation(); cx.notify();
+  },
+  // A drag on a picture (pan) or its thumb, from the root's mouse move; the root's mouse up ends it.
+  hsMove(e, cx) {
+    const p = this.hsDrag, s = p && this.hs?.get(p.id);
+    if (!s) return;
+    const d = e.position.x - p.x0;
+    s.x = Math.max(0, Math.min(s.maxX, p.thumb ? p.from + (d * s.contentW) / (s.viewW || 1) : p.from - d)); cx.notify();
   },
 
   // The two deep looks, side by side on a fresh review: the analysis (understanding) and the code review (findings).
@@ -2606,7 +2628,7 @@ export const ReviewMode = {
       .child(h_flex().gap(6).child(pill(`rv-exask-${i}`, t, "Ask about this layer", (_e, cx) => this.setDrawer("open", cx, { layer: this.exAi.steps.indexOf(s) })).tooltip("Ask one model question about this layer; the answer stays private"))
         .child(pill(`rv-exdrill-${i}`, t, "Show details", (_e, cx) => this.showDetails({ id: `layer:${i}`, label: plain(s.title), kind: "layer", why: plain(s.why), text: s.text, files: (s.evidence ?? []).map(pathOf), evidence: s.evidence ?? [] }, `exlayer:${i}`, cx)).tooltip("One model call breaks this layer down further")))
       .child(this.drillPanel(t, `exlayer:${i}`))
-      .when(s.visuals?.length > 0, (e) => e.child(div().max_w(760).child(visualsCard(s.visuals, t, `rv-exvis-${i}`, (at, cx) => this.jumpTo(at, cx), this.visTab?.[`x${i}`] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [`x${i}`]: k }; cx.notify(); }))))
+      .when(s.visuals?.length > 0, (e) => e.child(div().max_w(760).child(visualsCard(s.visuals, t, `rv-exvis-${i}`, (at, cx) => this.jumpTo(at, cx), this.visTab?.[`x${i}`] ?? 0, (k, cx) => { this.visTab = { ...this.visTab, [`x${i}`]: k }; cx.notify(); }, this.wrapX()))))
       .children((s.flows ?? []).map((f, k) => div().max_w(760).child(flowCard(f, t, `rv-exflow-${i}-${k}`, (_e, cx) => { this.jumpTo(f.at, cx); cx.stop_propagation(); }))));
   },
 
@@ -2798,7 +2820,7 @@ export const ReviewMode = {
     const go = (n, _e, cx) => { const h = this.fileHunks?.get(n.file)?.[0]; if (h) this.jumpTo(`${n.file}:${h.rows.find((r) => r.n)?.n ?? ""}`, cx); else if (n.file) { this.note = `${n.file} is not in the diff (related context)`; cx.notify(); } };
     return v_flex().gap(12)
       .child(header.child(div().text_size(13).font_semibold().child(`${b.counts.added} Added | ${b.counts.changed} Changed | ${b.counts.up} Upstream | ${b.counts.down} Downstream`)))
-      .child(div().id("rv-blast-scroll").w_full().overflow_x_scroll().pb(8).child(archView(L, t, "rv-blast", go, deco, opts)))
+      .child(this.hscroll("rv-blast-scroll", L.width + 4, L.height + 4, archView(L, t, "rv-blast", go, deco, opts), t))
       .child(archLegend(L, t, "rv-blast-edges", "How the context links to the changes", opts, true))
       .when(this.blastOpen, (e) => e.children((blast.units ?? []).flatMap((u) => (u.files ?? []).flatMap((file) => (this.fileHunks?.get(file) ?? []).map((h) => this.hunkBlock(h, t, `${u.id}`))))));
   },
@@ -2907,10 +2929,11 @@ export const ReviewMode = {
         .child(h_flex().flex_wrap().gap(6)
           .child(pill(`rv-fcm-${x.id}`, t, "Add as comment", (_e, cx) => this.findingComment(x, cx)).tooltip("Add this finding to your pending comments"))
           .child(pill(`rv-fdi-${x.id}`, t, "Discuss in chat", (_e, cx) => this.discuss(x, cx)).tooltip("Discuss this finding with the PR's agent; a preview first, nothing is sent until you confirm"))
-          .children((() => { const fv = this.fixView(this.fixOf(x.id)); return !fv ? [pill(`rv-ffx-${x.id}`, t, "Fix…", (_e, cx) => this.fix([x], cx), false, t.foreground).tooltip("Fix this with an agent: a preview first; a sub-agent works in its own git worktree and never pushes")]
-            : [badge(t, fv.commit ? `Fix ready on ${fv.job.branch ?? "the PR"}` : `Fixing · ${fv.status}`, fv.commit ? t.ansi2 : t.ansi3).id(`rv-ffb-${x.id}`).tooltip("The fix agent's progress on this finding"),
+          .children((() => { const fv = this.fixView(this.fixOf(x.id)); return !fv ? [pill(`rv-ffx-${x.id}`, t, "Fix…", (_e, cx) => this.fix([x], cx), false, t.foreground).tooltip("Fix this with an agent: a preview first; a sub-agent works in its own git worktree, never pushes and hands the fix to the PR's agent")]
+            : [badge(t, fv.handed ? "Handed to PR agent" : fv.commit ? `Fix ready on ${fv.job.branch ?? "the PR"}` : `Fixing · ${fv.status}`, fv.commit ? t.ansi2 : t.ansi3).id(`rv-ffb-${x.id}`).tooltip("The fix agent's progress on this finding"),
               ...(fv.job.terminal ? [pill(`rv-fgo-${x.id}`, t, "Go to fix", () => this.goFix(fv.job)).tooltip("Show the fix agent's terminal")] : []),
-              ...(fv.commit && fv.job.target === "sub" ? [pill(`rv-fap-${x.id}`, t, "Apply to PR", (_e, cx) => this.applyFix(fv.job, cx), false, t.ansi2).tooltip("Cherry-pick the fix commits onto the PR's checkout; nothing is pushed")] : []),
+              ...(fv.commit && fv.job.target === "sub" ? [pill(`rv-fap-${x.id}`, t, "Apply to PR", (_e, cx) => this.applyFix(fv.job, cx), false, fv.handed ? undefined : t.ansi2)
+                .tooltip(fv.handed ? "The PR's agent got this fix to take over; cherry-pick it onto the PR's checkout yourself only if it doesn't (not pushed)" : "Cherry-pick the fix commits onto the PR's checkout; nothing is pushed")] : []),
               ...(fv.job.target === "sub" ? [pill(`rv-fdc-${x.id}`, t, "Discard fix", (_e, cx) => this.discardFix(fv.job, cx)).tooltip("Delete the fix's worktree and branch")] : [])]; })())
           .child(pill(`rv-fdm-${x.id}`, t, "Dismiss", (_e, cx) => this.setFinding(x, "dismissed", cx)).tooltip("Mark this finding as dismissed")));
     };
@@ -2927,7 +2950,7 @@ export const ReviewMode = {
           chip("status", v, label, v === "all" ? all.length : v === "open" ? count((x) => ["open", "progress", "recheck"].includes(this.fstatus(x))) : count((x) => this.fstatus(x) === v)))))
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().text_size(12).text_color(t.muted).child(Object.values(runs).some((r) => r.busy) ? "A reviewer is running…" : all.length ? `${shown.length} shown` : "No findings yet. Run a reviewer:"))
-          .when(open.length > 0, (e) => e.child(pill("rv-fixall", t, `Fix ${open.length} open (shown)`, (_e, cx) => this.fix(open, cx), false, t.foreground).tooltip("Fix the open findings shown here with an agent; a preview first, nothing is pushed")))))
+          .when(open.length > 0, (e) => e.child(pill("rv-fixall", t, `Fix ${open.length} open (shown)`, (_e, cx) => this.fix(open, cx), false, t.foreground).tooltip("Fix the open findings shown here with an agent; a preview first, then the PR's agent takes the fix over and pushes")))))
       .when(!all.length, (e) => e.child(h_flex().flex_none().flex_wrap().px(14).py(8).gap(6).border_b(1).border_color(t.border)
         .children(reviewersNow().map(([k, [label]]) => pill(`rv-frun-${k}`, t, runs[k]?.busy ? `${label} running…` : label, (_e, cx) => this.runReviewer(k, cx), false, t.foreground).tooltip("Run this reviewer read-only on the PR head; its findings show here")))))
       .child(div().flex_1().min_h(0).relative()
@@ -3149,8 +3172,8 @@ export const ReviewMode = {
       if (this.exStart !== ex) { if (ex.start && this.exStart?.at !== ex.at) this.exRoot = null; this.enterExplore(ex, cx); }
       const root = v_flex().id("rv-root").size_full().bg(t.background).text_color(t.foreground).text_size(13.5)
         .on_size_change((size, cx) => { if (Math.abs((this.winW ?? 0) - size.width) > 8) { this.winW = size.width; cx.notify(); } })
-        .on_mouse_move((e, cx) => { if (this.drag) { this.dragW = leftWidth(e.local_position?.x ?? e.position.x, this.winW); cx.notify(); } const g = this.archGeom, p = this.archPan ?? this.archThumb; if (g && p) { const d = e.position.x - p.x0; this.archX = Math.max(0, Math.min(g.maxX, this.archThumb ? p.from + (d * g.contentW) / g.viewW : p.from - d)); cx.notify(); } })
-        .on_mouse_up("left", (_e, cx) => { this.archPan = null; this.archThumb = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
+        .on_mouse_move((e, cx) => { if (this.drag) { this.dragW = leftWidth(e.local_position?.x ?? e.position.x, this.winW); cx.notify(); } this.hsMove(e, cx); })
+        .on_mouse_up("left", (_e, cx) => { this.hsDrag = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
         .track_focus(this.fh).on_key_down((e, cx) => this.onReviewKey(e, cx));
       return this.renderExplore(cx, ex, root);
     }
@@ -3172,10 +3195,9 @@ export const ReviewMode = {
       // ponytail: a release outside the window keeps dragging until the next release here.
       .on_mouse_move((e, cx) => {
         if (this.drag) { this.dragW = leftWidth(e.local_position?.x ?? e.position.x, this.winW); cx.notify(); }
-        const g = this.archGeom, p = this.archPan ?? this.archThumb;
-        if (g && p) { const d = e.position.x - p.x0; this.archX = Math.max(0, Math.min(g.maxX, this.archThumb ? p.from + (d * g.contentW) / g.viewW : p.from - d)); cx.notify(); }
+        this.hsMove(e, cx);
       })
-      .on_mouse_up("left", (_e, cx) => { this.archPan = null; this.archThumb = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
+      .on_mouse_up("left", (_e, cx) => { this.hsDrag = null; if (this.drag) { this.drag = false; if (this.dragW !== null && this.dragW !== undefined) setShared("review.leftWidth", this.dragW); this.dragW = null; cx.notify(); } })
       .track_focus(this.fh).on_key_down((e, cx) => this.onReviewKey(e, cx));
     if (!target || other) {
       return root.items_center().justify_center().gap(12).text_color(t.muted)

@@ -31,6 +31,7 @@
 | <img src="docs/previews/goto.png" width="240" alt="Go to" /> | **[Go to](https://github.com/saefty/herdr-corgi-goto)**: a ⌘⇧P box that finds what is already open before it opens anything new: agents by a few words of their task, spaces, repos, PRs, URLs and Herdr's commands. |
 | <img src="docs/previews/chatbar.png" width="240" alt="Chat bar" /> | **[Chat bar](https://github.com/saefty/herdr-corgi-chatbar)**: one bubble per agent that waits on you. Read the question, press an option or type a reply, and stay where you are. |
 | <img src="docs/screenshots/interplay-dictate.png" width="240" alt="Dictate" /> | **[Dictate](https://github.com/saefty/herdr-corgi-dictate)**: press a key, speak, press it again; the text is transcribed on your Mac and lands where your cursor is, never sent. macOS on Apple Silicon. |
+| | **[Resume](https://github.com/saefty/herdr-corgi-resume)**: after a reboot, a toast lists the Claude Code sessions that were cut off; tick the ones you want and each resumes in its terminal. Nothing resumes on its own. |
 | <img src="docs/previews/timetrack.png" width="240" alt="Time tracker" /> | **[Time tracker](https://github.com/saefty/herdr-corgi-timetrack)**: a chip that counts today's work time while you or your agents work, and writes every day to an Excel workbook. |
 
 ## Better together

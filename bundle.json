@@ -23,5 +23,10 @@
     "repo": "https://github.com/saefty/herdr-corgi-dictate",
     "tag": "v0.2.0",
     "sha": "63b4a1b0e4a94a06bce6a42469ad36694875ce71"
+  },
+  "resume": {
+    "repo": "https://github.com/saefty/herdr-corgi-resume",
+    "tag": "v0.1.1",
+    "sha": "e6a1094ee47e917307c0a95020f745977a9dc02f"
   }
 }

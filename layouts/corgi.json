@@ -163,6 +163,14 @@
                   "align": "start"
                 },
                 {
+                  "id": "resume",
+                  "content": {
+                    "mod": "resume"
+                  },
+                  "edge": "top",
+                  "align": "end"
+                },
+                {
                   "id": "dictate",
                   "content": {
                     "mod": "dictate"

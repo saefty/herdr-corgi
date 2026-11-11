@@ -70,7 +70,7 @@ root (row)
    │  └─ timetrack     block  timetrack {part: "bar"}    76 px, window_drag
    ├─ work-body (row, padding 8, gap 8)
    │  ├─ main          block  {tab: "active", pane: {...}}
-   │  │                floating: corgi (bottom start), dictate (bottom center), chatbar (bottom end)
+   │  │                floating: corgi (bottom start), dictate (bottom center), chatbar (bottom end), resume (top end)
    │  └─ review (column, 380 px, 280 to 900)
    │     └─ pr         block  pr-review (no props: the panel)
    └─ status           block  workspace-status           28 px
@@ -97,6 +97,9 @@ root (row)
   - `dictate` ([recipe](https://github.com/saefty/herdr-corgi-dictate/blob/main/RECIPE.md)): the floating block,
     which also receives `dictate.toggle`. Runs `python3 voice.py`, `ffmpeg` and parakeet-mlx; reads the clipboard
     and runs `terminal.paste`. The model downloads on first use; nothing else leaves the machine.
+  - `resume` ([recipe](https://github.com/saefty/herdr-corgi-resume/blob/main/RECIPE.md)): the floating watcher (top end,
+    draws nothing). A Claude Code hook (`python3 hook.py`, added only on Set up) records each session per terminal;
+    after a restart it posts a `notify()` that opens the resume dialog. Resuming types into the terminal (`hc send`).
   - `corgi`: the floating update notice. Runs `python3 <clone>/corgi.py status --json` once a day and posts a
     `notify()` whose action is `mod.open {"name": "corgi"}`.
 - The mods talk only through shared state (`goto.*`, `chatbar.*`, `dictate.*`, `review.*`, `timetrack.*`), as

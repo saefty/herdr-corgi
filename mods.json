@@ -25,6 +25,11 @@
       "path": "mods/dictate",
       "default": true
     },
+    "resume": {
+      "repo": "https://github.com/saefty/herdr-corgi-resume.git",
+      "path": "mods/resume",
+      "default": true
+    },
     "corgi": {
       "repo": "https://github.com/saefty/herdr-corgi.git",
       "path": "mods/corgi",

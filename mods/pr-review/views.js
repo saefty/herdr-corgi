@@ -42,3 +42,27 @@ export function wheelStep(g, { dx = 0, dy = 0, t, phase, shift = false }, x, max
   const used = axis === "x" && max > 0, clamp = (v) => Math.max(0, Math.min(max, v));
   return { g: { axis, at: t }, x: clamp(used ? x - (dx || (shift ? dy : 0)) : x), used };
 }
+
+// gh pr diff refuses PRs over 300 files (HTTP 406 / too_large): then the diff is made from a local clone.
+export const diffTooLarge = (msg) => /HTTP 406|exceeded the maximum number of files|too_large/i.test(String(msg));
+
+// The "List pull request files" API's files as gh-pr-diff-shaped text (pr.js splitPatch). A file without a patch
+// (binary, or too large for GitHub) keeps its header and a note.
+export function filesToDiff(files) {
+  const out = [];
+  for (const f of files) {
+    const from = f.previous_filename ?? f.filename, added = f.status === "added", removed = f.status === "removed";
+    out.push(`diff --git a/${from} b/${f.filename}`);
+    if (added) out.push("new file mode 100644");
+    else if (removed) out.push("deleted file mode 100644");
+    else if (f.status === "renamed") out.push(`rename from ${from}`, `rename to ${f.filename}`);
+    if (f.patch) out.push(`--- ${added ? "/dev/null" : `a/${from}`}`, `+++ ${removed ? "/dev/null" : `b/${f.filename}`}`, f.patch);
+    else out.push(`Binary files a/${from} and b/${f.filename} differ`, `No diff from GitHub for this file (binary or too large): +${f.additions ?? 0} -${f.deletions ?? 0}`);
+  }
+  return out.join("\n") + "\n";
+}
+
+// ---- files folded when a review opens: lock files and generated output, and big changes (click the header to open)
+const LOCK = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|flake\.lock|gradle\.lockfile|[^/]*\.lock|[^/]*\.min\.(js|css)|[^/]*\.map)$/;
+export const FOLD_LINES = 400;
+export const foldOnOpen = (patch) => (patch ?? []).filter((f) => LOCK.test(f.path) || (f.add ?? 0) + (f.del ?? 0) > FOLD_LINES).map((f) => f.path);

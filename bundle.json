@@ -21,12 +21,12 @@
   },
   "dictate": {
     "repo": "https://github.com/saefty/herdr-corgi-dictate",
-    "tag": "v0.2.0",
-    "sha": "63b4a1b0e4a94a06bce6a42469ad36694875ce71"
+    "tag": "v0.3.0",
+    "sha": "d0cb42f3de67a305c4681cc345682528257d3ff1"
   },
   "resume": {
     "repo": "https://github.com/saefty/herdr-corgi-resume",
-    "tag": "v0.2.0",
-    "sha": "33dc5e117ad03d500287a066b4b88e357808d7ed"
+    "tag": "v0.3.0",
+    "sha": "72309e4a38163d67e37863f49b816e53bad22384"
   }
 }

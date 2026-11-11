@@ -22,12 +22,14 @@ const WARNING = (n) => `New releases wait ${n} days before Corgi offers them. Th
 const clock = (ms) => new Date(ms).toTimeString().slice(0, 5);
 
 export default class Corgi extends View {
+  async close() { if (this.overlay) setShared("corgi.open", false); }
   init(_props, cx) {
     this.overlay = props()?.overlay ?? null;
     this.busy = false;
     this.again = false; // a settings change arrived during a check: check once more after it
     this.confirmEarly = false;
     if (this.overlay) {
+      setShared("corgi.open", true); // a bar can show its button as open
       if (!shared(KEY)?.checked) this.check(cx, false);
       return;
     }
@@ -100,10 +102,10 @@ export default class Corgi extends View {
       : !s.checked ? [line(t.muted, "Not checked yet.")]
       : [...updates.map((u) => v_flex().gap(4).child(
           h_flex().gap(6).text_size(13).child(div().font_semibold().text_color(t.foreground).child(u.name))
-            .child(div().text_color(t.muted).child(`${u.from} → ${u.to}`)))
+            .child(div().id(`ver-${u.name}`).text_color(t.muted).tooltip("Installed version, then the newer version to update to.").child(`${u.from} → ${u.to}`)))
           .child(u.changelog ? TextView.markdown(`log-${u.name}`, u.changelog) : line(t.dim, "No changelog entry."))),
          ...(updates.length ? [] : [line(t.muted, "Everything is up to date.")]),
-         ...pending.map((p) => line(t.muted, `${p.name} ${p.version} available on ${shortDate(p.available_on)}`))];
+         ...pending.map((p) => line(t.muted, `${p.name} ${p.version} available on ${shortDate(p.available_on)}`).id(`pending-${p.name}`).tooltip("A newer release that is still within the waiting period."))];
 
     const small = (id, label, onClick) => div().id(id).px(6).rounded(4).text_size(12).cursor_pointer().bg(t.raised)
       .hover((st) => st.bg(t.hover)).on_click(onClick).child(label);
@@ -111,31 +113,31 @@ export default class Corgi extends View {
       : this.confirmEarly ? [v_flex().gap(6).p(8).rounded(5).border_1().border_color(t.blocked)
           .child(line(t.foreground, WARNING(cfg.days)))
           .child(h_flex().gap(8).justify_end()
-            .child(button("early-cancel", "Cancel", false, (_e, cx) => { this.confirmEarly = false; cx.notify(); }))
-            .child(button("early-confirm", "Turn on early updates", true, (_e, cx) => this.setting(cx, "early-updates", "on", { ...cfg, early: true }))))]
+            .child(button("early-cancel", "Cancel", false, (_e, cx) => { this.confirmEarly = false; cx.notify(); }).tooltip("Keep early updates off."))
+            .child(button("early-confirm", "Turn on early updates", true, (_e, cx) => this.setting(cx, "early-updates", "on", { ...cfg, early: true })).tooltip("Offer releases before the waiting period ends.")))]
       : [h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
           .child(div().child("Wait"))
-          .child(small("days-down", "−", (_e, cx) => this.setting(cx, "min-release-age", Math.max(0, cfg.days - 1), { ...cfg, days: Math.max(0, cfg.days - 1) })))
+          .child(small("days-down", "−", (_e, cx) => this.setting(cx, "min-release-age", Math.max(0, cfg.days - 1), { ...cfg, days: Math.max(0, cfg.days - 1) })).tooltip("Wait one day less before offering a release.").accessibility_label("Decrease waiting days"))
           .child(div().text_color(t.foreground).child(String(cfg.days)))
-          .child(small("days-up", "+", (_e, cx) => this.setting(cx, "min-release-age", cfg.days + 1, { ...cfg, days: cfg.days + 1 })))
+          .child(small("days-up", "+", (_e, cx) => this.setting(cx, "min-release-age", cfg.days + 1, { ...cfg, days: cfg.days + 1 })).tooltip("Wait one day longer before offering a release.").accessibility_label("Increase waiting days"))
           .child(div().flex_1().child("days before offering a release"))
           .child(small("early", `Early updates: ${cfg.early ? "on" : "off"}`, (_e, cx) => {
             if (cfg.early) this.setting(cx, "early-updates", "off", { ...cfg, early: false });
             else { this.confirmEarly = true; cx.notify(); }
-          }))];
+          }).tooltip("Toggle offering releases before the waiting period ends."))];
 
     return v_flex().id("root").size_full().bg(t.popover).p(14).gap(10).text_color(t.foreground)
       .child(h_flex().justify_between().items_center()
         .child(h_flex().gap(8).items_center().child(image(LOGO).size(22))
           .child(div().font_semibold().text_size(14).child("Corgi")).child(div().text_size(12).text_color(t.muted).child("Mod updates"))
-          .when(!!cfg?.early, (el) => el.child(div().px(6).rounded(4).text_size(11).border_1().border_color(t.blocked)
+          .when(!!cfg?.early, (el) => el.child(div().id("early-badge").tooltip("Releases are offered before the waiting period ends.").px(6).rounded(4).text_size(11).border_1().border_color(t.blocked)
             .text_color(t.blocked).child("⚠ early updates on"))))
-        .child(div().text_size(11).text_color(t.dim).child(s.checked ? `Checked ${clock(s.checked)}` : "")))
+        .child(div().id("checked-at").tooltip("When updates were last checked.").text_size(11).text_color(t.dim).child(s.checked ? `Checked ${clock(s.checked)}` : "")))
       .child(v_flex().id("list").flex_1().gap(12).overflow_y_scrollbar().children(body)
         .children((s.errors ?? []).map((e) => line(t.dim, `${e.name}: ${e.error}`))))
       .children(settings)
       .child(h_flex().gap(8).justify_end()
-        .child(button("again", "Check now", false, (_e, cx) => this.check(cx, false)))
-        .when(updates.length > 0 && !this.busy, (el) => el.child(button("update", "Update", true, () => this.update()))));
+        .child(button("again", "Check now", false, (_e, cx) => this.check(cx, false)).tooltip("Look for mod updates now."))
+        .when(updates.length > 0 && !this.busy, (el) => el.child(button("update", "Update", true, () => this.update()).tooltip("Install the listed updates in a new tab."))));
   }
 }

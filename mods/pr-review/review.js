@@ -11,7 +11,7 @@
 // submit popover: one GitHub review (gh api) or, for a PR with an agent session, the prompt to that session.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, v_virtual_list, VirtualListScrollHandle, Textarea, TextareaState, Input, InputState } from "gpui-base";
-import { exec, hc, run, spaces, agents, focused, pickFolder, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home } from "herdr";
+import { exec, hc, run, spaces, agents, terminals, focused, pickFolder, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home } from "herdr";
 import { parseReports, findingStatus, fixPrompt, hash, touchReview, expireReviews, resumeFields, itemKeys, expandTabs, tokenAt } from "./pr.js";
 import * as C from "./context.js";
 import { hasTool, copyText, openUrl, loadSetup, readConfig } from "./setup-view.js";
@@ -1382,8 +1382,10 @@ export const ReviewMode = {
   // and reported to the PR's agent), main.
   fixView(job) {
     const commit = job && TH.fixCommit(job, this.replies, this.find.reports);
-    const agent = job?.terminal ? agents().find((a) => a.address === job.terminal) : null;
-    return job ? { job, commit, handed: Boolean(commit && job.handoff), status: agent?.status ?? (job.target === "main" ? "main agent" : "ended") } : null;
+    // agents() has only terminals shown in a pane; a sub-agent runs in the background, so terminals() (hc ls) too.
+    const agent = job?.terminal ? agents().find((a) => a.address === job.terminal) ?? terminals().find((x) => x.address === job.terminal && x.state === "live") : null;
+    const status = agent?.status === "blocked" ? "waits for your OK" : agent?.status;
+    return job ? { job, commit, handed: Boolean(commit && job.handoff), status: status ?? (job.target === "main" ? "main agent" : "ended") } : null;
   },
   // Comments by id: the pending ones and the sent threads.
   commentsById(ids) {
@@ -1429,7 +1431,7 @@ export const ReviewMode = {
   // A new Claude as a sub-agent of the PR's agent, in a fresh worktree on the fix branch from the PR head the preview
   // named; the PR's agent gets a short start notice (hc send; a busy Claude queues it), the sub-agent reports back itself.
   startSubFix(p, text, cx) {
-    const f = p.fix, base = this.fixBase(), key = this.threadKey();
+    const f = p.fix, base = this.fixBase(), key = this.threadKey(), trusted = this.trustedPr(); // trust of the PR the prompt is for
     if (!base) { this.note = "Not started: the PR has no local checkout to branch the fix from"; return cx.notify(); }
     this.sending = true; this.note = null;
     cx.spawn(async (cx) => {
@@ -1441,7 +1443,7 @@ export const ReviewMode = {
         const w = await git(["worktree", "add", "-b", f.branch, f.path, head]);
         if (w.code !== 0) throw new Error(w.stderr.trim().slice(0, 200));
         const id = Date.now().toString(36), { agent } = this.sendAgent();
-        const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id }));
+        const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id, auto: trusted }));
         if (r.code !== 0) { await git(["worktree", "remove", "--force", f.path]); await git(["branch", "-D", f.branch]); throw new Error((r.stderr || r.stdout).trim().slice(0, 200)); }
         const terminal = JSON.parse(r.stdout).address, handoff = f.main && text.includes(`hc send ${f.main} `) ? f.main : null; // the text may have been edited
         this.updateThreads(cx, (d) => TH.addFix(d, key, { id, branch: f.branch, path: f.path, base, head, items: f.items, terminal, target: "sub", handoff, at: Date.now(), state: "running" }));

@@ -22,7 +22,7 @@ import { ghTarget, lowValue, markReviewed, sinceBase, verifyCandidates, applyVer
 import { diffLines, inDiff, ghReview, lineThreads, suggestionBlock, buildReview, layoutPlan, specElements, diagramsState } from "./pr.js";
 import { wheelStep, foldOnOpen, allocate, recenter, hsVisible } from "./views.js";
 import { archView, archModel, archLegend, visualsCard, visualCard, statCard, segBar, foldCard, chip, legend, specTag, sourceLegend, SEVERITY_COLOR } from "./stack.js";
-import { hasSources, archLayout } from "./arch.js";
+import { hasSources, archLayout, archBands } from "./arch.js";
 import * as TH from "./threads.js";
 import { leftWidth, rowClick, CHIP_W, ASK_W, keyRoute, scopeLine, pictureOf, scopeOf, scopeFiles, hunksFor, mapAnswer, threadAdd, threadOf, history, highlightOf, rangeLabel, pinAnchor, pinAdd, pinDrop, pinsOf, pinsOn, codePins, drillPush, drillTo, crumbs, drillKey, cachePut, mapDrill, exploreId, exploreIndex, exploreAi, pathOf, lineOf, repoOfRemote, exploreTrust } from "./explore.js";
 
@@ -336,10 +336,19 @@ export const ReviewMode = {
   async onSource(cx) {
     const url = this.prSel?.url;
     if (!url || !this.patch) return;
-    this.hunks = hunksOf(this.patch).map((h) => ({ ...h, rows: diffRows(h.lines) }));
+    // Herdr stops a script slice after ~50 ms ("interrupted"): a big PR's hunks are made file by file, with a pause
+    // (a timer, so a fresh slice) every 12 ms; the same ids and aliases as hunksOf over the whole patch.
+    const patch = this.patch, hunks = [], fileHunks = new Map();
+    this.hunks = null; // until they match this patch (loadAi reuses them)
+    let t = Date.now();
+    for (const f of patch) {
+      const hs = hunksOf([f]).map((h, i) => ({ ...h, alias: `h${hunks.length + i + 1}`, rows: diffRows(h.lines) }));
+      hunks.push(...hs);
+      if (hs.length) fileHunks.set(f.path, hs);
+      if (Date.now() - t > 12) { await new Promise((r) => cx.timer.after(0, r)); t = Date.now(); if (this.patch !== patch) return; }
+    }
+    this.hunks = hunks; this.fileHunks = fileHunks;
     this.byId = new Map(this.hunks.map((h) => [h.id, h]));
-    this.fileHunks = new Map();
-    for (const h of this.hunks) this.fileHunks.set(h.path, [...(this.fileHunks.get(h.path) ?? []), h]);
     this.diffLines = diffLines(this.hunks);
     this.loadGhComments(cx);
     await this.loadThreads(cx);
@@ -553,7 +562,7 @@ export const ReviewMode = {
     const m = model(), url = this.prSel?.url;
     this.aiModel = m;
     if (!url || !this.patch) return;
-    const job = reviewRequest({ url, pr: url.startsWith("https://") ? url : null, worktree: this.worktree?.path ?? null, files: this.patch, model: m, context: this.ctxReq(), dir: cacheDir() });
+    const job = reviewRequest({ url, pr: url.startsWith("https://") ? url : null, worktree: this.worktree?.path ?? null, files: this.patch, hunks: this.hunks, model: m, context: this.ctxReq(), dir: cacheDir() });
     if (mode === "run") {
       if (this.aiBusy) return;
       if (!job.req.hunks.length) { this.aiError = "No diff"; return cx.notify(); }
@@ -600,7 +609,7 @@ export const ReviewMode = {
   refreshDiagrams(cx) {
     const url = this.prSel?.url, file = this.aiFile, m = model();
     if (!url || !file || !this.patch || this.diaBusy) return;
-    const job = reviewRequest({ url, pr: url.startsWith("https://") ? url : null, worktree: this.worktree?.path ?? null, files: this.patch, model: m, context: this.ctxReq(), dir: cacheDir() });
+    const job = reviewRequest({ url, pr: url.startsWith("https://") ? url : null, worktree: this.worktree?.path ?? null, files: this.patch, hunks: this.hunks, model: m, context: this.ctxReq(), dir: cacheDir() });
     const status = `${file}.diagrams.status`;
     const req = { diagrams: file, also: [job.out, job.latest].filter((x) => x !== file), head: this.head, model: m, context: this.ctxReq(), pr: job.req.pr,
       worktree: job.req.worktree, hunks: job.req.hunks, status };
@@ -1076,7 +1085,9 @@ export const ReviewMode = {
   unfold(p) { this.collapsed.delete(p); this.recentOpen = [p, ...(this.recentOpen ?? []).filter((x) => x !== p)].slice(0, 200); },
   filesItems() {
     const items = [], at = {}, sh = this.shown();
-    const cap = this.rowCap = Math.max(1000, 9700 - 2 * sh.patch.length); // room for every file's header and one note
+    // 2500 lines open at most: every render walks the list's items, and Herdr stops a slice after ~50 ms; 9000 open
+    // lines took that long. The virtual list's own limit (10000) leaves room for every file's header and one note.
+    const cap = this.rowCap = Math.min(2500, Math.max(1000, 9700 - 2 * sh.patch.length));
     // The virtual list holds at most 10000 items: the files around the one you read (this.center, autoFold) and the
     // ones you opened last get the room (views.js allocate); the rest fold to one item of their height (overBudget).
     const rowsOf = new Map(), open = [], heads = []; // not `rows`: the loop below has its own
@@ -2329,7 +2340,7 @@ export const ReviewMode = {
     const set = (name, v, cx) => { if (this[name] !== v) { this[name] = v; cx.notify(); } };
     return { hl: this[`${k}Hl`] ?? (k === "arch" ? this.askHl : null), focus: this[`${k}Focus`] ?? null, hover: this[`${k}Hover`] ?? null,
       onHl: (v, cx) => set(`${k}Hl`, v, cx), onHover: (v, cx) => set(`${k}Hover`, v, cx),
-      onFocus: (v, cx) => { this.fh.focus(); set(`${k}Focus`, v, cx); if (k === "arch" && v && this.drawerState() !== "open") this.setDrawer("open", cx); }, onJump: (at, cx) => this.jumpTo(at, cx) };
+      onFocus: (v, cx) => { this.fh.focus(); set(`${k}Focus`, v, cx); }, onJump: (at, cx) => this.jumpTo(at, cx) };
   },
 
   archPage(t) {
@@ -2344,23 +2355,80 @@ export const ReviewMode = {
     return v_flex().gap(12)
       .child(h_flex().gap(12).items_center().flex_wrap().child(div().text_size(20).font_semibold().child("Architecture impact")).child(this.diagramsBar(t, "rv-dia-arch", "Refresh diagrams"))
         .when(this.drawerState() !== "open", (e) => e.child(pill("rv-ask-open", t, "Ask", (_e, cx) => this.setDrawer("open", cx, null)).tooltip("Ask one model question about the architecture picture")))
-        .when(Boolean(this.archFocus), (e) => { const n = a.nodes.find((x) => x.id === this.archFocus); return n ? e.child(pill("rv-drill-arch", t, `Show details: ${n.label ?? n.id}`,
-          (_e, cx) => this.showDetails({ id: n.id, label: n.label ?? n.id, group: (a.groups ?? []).find((g) => g.id === n.group)?.label, at: n.at ?? n.evidence, kind: "node", description: n.description }, "arch", cx), false, t.foreground).tooltip("One model call breaks the selected card down further")) : e; }))
+)
       .child(h_flex().w_full().gap(12).items_center().flex_wrap() // wraps onto two rows when narrow
         .child(div().flex_none().text_size(13).text_color(t.muted).child(`${groups} ${groups === 1 ? "system" : "systems"} | ${(a.edges ?? []).length} edges`))
         .child(div().flex_none().child(legend(t)))
         .when(hasSources(a) || (this.ai.visuals ?? []).some(hasSources), (e) => e.child(div().flex_none().child(sourceLegend(t))))
         .child(h_flex().flex_none().gap(2).p(2).rounded(7).border_1().border_color(t.border).child(seg("diff", "Structural diff")).child(seg("before", "Before")).child(seg("after", "After")))
         .child(div().id("rv-av-fit").flex_none().px(10).h(28).flex().items_center().rounded(7).border_1().border_color(fit ? t.accent : t.border).cursor_pointer().text_size(12.5)
-          .text_color(fit ? t.foreground : t.muted).tooltip("Narrow cards, so a wide picture fits the view").on_click((_e, cx) => { this.archFit = !fit; this.hsOf("rv-arch-canvas").x = 0; cx.notify(); }).child("Fit")))
-      // 40 px of room after the last column.
-      .child(this.hscroll("rv-arch-canvas", L.width + 4 + 40, L.height + 4, [archView(L, t, "rv-arch", (n, _e, cx) => this.jumpTo(n.at, cx), null, opts), ...this.pinNotes(t, L)], t))
-      .child(this.drillPanel(t, "arch"))
+          .text_color(fit ? t.foreground : t.muted).tooltip("Narrow cards, so a wide picture fits the view").on_click((_e, cx) => { this.archFit = !fit; this.hsOf("rv-arch-canvas").x = 0; cx.notify(); }).child("Fit"))
+        .child(div().id("rv-av-wrap").flex_none().px(10).h(28).flex().items_center().rounded(7).border_1().border_color(this.archWrapOn() ? t.accent : t.border).cursor_pointer().text_size(12.5)
+          .text_color(this.archWrapOn() ? t.foreground : t.muted).tooltip("On: a picture wider than the view in bands, top to bottom. Off: one row to scroll sideways")
+          .on_click((_e, cx) => { this.archWrap = !this.archWrapOn(); this.hsOf("rv-arch-canvas").x = 0; cx.notify(); }).child("Wrap")))
+      .child(this.archCanvas(t, L, opts))
+      .child(this.archCard(t, a))
+      .when(Boolean(this.archFocus), (e) => e.child(this.drillPanel(t, `arch:${this.archFocus}`)))
       .child(archLegend(L, t, "rv-arch-edges", "Edges", opts))
       .when(this.ai?.visuals?.length > 0, (e) => e.child(div().pt(6).text_size(13).font_semibold().text_color(t.muted).child("More views"))
         .child(div().max_w(760).child(more())));
   },
 
+  // The picture: wider than the view and Wrap on (archWrapOn), in bands stacked top to bottom (arch.js archBands: lines run on in the next band
+  // at the same height); else one row in the sideways scroller (40 px of room after the last column).
+  archCanvas(t, L, opts) {
+    const s = this.hsOf("rv-arch-canvas"), B = archBands(L, s.viewW && this.archWrapOn() ? hsVisible(s.viewW, this.drawerCover()) - 4 : 0); // 0: not measured yet or Wrap off, one row
+    const pic = (k) => [archView(L, t, `rv-arch${k ? `-${k}` : ""}`, (n, _e, cx) => this.jumpTo(n.at, cx), null, opts), ...this.pinNotes(t, L)];
+    if (B.length < 2) return this.hscroll("rv-arch-canvas", L.width + 4 + 40, L.height + 4, pic(0), t);
+    return v_flex().id("rv-arch-canvas").w_full().gap(6)
+      .on_size_change((size, cx) => { if (Math.abs(s.viewW - size.width) > 2) { s.viewW = size.width; cx.notify(); } })
+      .children(B.flatMap((b, k) => [
+        ...(k ? [div().id(`rv-arch-cut${k}`).w_full().h(0).border_t(1).border_dashed().border_color(t.border).tooltip("The picture goes on here: lines leaving the band above on the right come in on the left at the same height")] : []),
+        div().id(`rv-arch-band${k}`).w(b.x1 - b.x0).h(L.height + 4).relative().overflow_hidden()
+          .child(div().absolute().top(0).left(-b.x0).w(L.width).h(L.height + 4).children(pic(k)))]));
+  },
+  // The clicked card, under the picture: its whole description and the analysis's details (what it does overall, what
+  // the PR changes in it). An analysis without details (older ones): Explain, one model call (the drill-down below).
+  archCard(t, a) {
+    const n = this.archFocus && a.nodes.find((x) => x.id === this.archFocus);
+    if (!n) return div();
+    const g = (a.groups ?? []).find((x) => x.id === n.group), at = n.at ?? n.evidence;
+    const explain = (_e, cx) => this.showDetails({ id: n.id, label: n.label ?? n.id, group: g?.label, at, kind: "node", description: n.description }, `arch:${n.id}`, cx, false, true);
+    return v_flex().id("rv-arch-card").gap(8).p(12).rounded(10).border_1().border_color(t.border).bg(t.surface)
+      .child(h_flex().gap(8).items_center().flex_wrap()
+        .child(div().text_size(15).font_semibold().child(n.label ?? n.id))
+        .child(div().text_size(12).text_color(t.muted).child([g?.label, n.type, n.status === "new" ? "added" : n.status].filter(Boolean).join(" · ")))
+        .child(div().flex_1())
+        .when(Boolean(at), (e) => e.child(pill("rv-arch-card-open", t, "Open ↗", (_e, cx) => this.jumpTo(at, cx)).tooltip(`Open ${at}`)))
+        .child(pill("rv-arch-card-explain", t, n.details ? "Look inside" : "Explain", explain, false, n.details ? null : t.foreground)
+          .tooltip(`One ${MODELS[model()].label} call reads the code: what this does overall, what the PR changes in it, and a picture of its inside`))
+        .when(this.drawerState() !== "open", (e) => e.child(pill("rv-arch-card-ask", t, "Ask", (_e, cx) => this.setDrawer("open", cx, null)).tooltip("Ask one model question about this card")))
+        .child(pill("rv-arch-card-x", t, "✕", (_e, cx) => { this.archFocus = null; cx.notify(); }).tooltip("Close (Esc)").accessibility_label("Close card details")))
+      .child(this.archCardFacts(t, a, n, at))
+      .when(Boolean(n.description), (e) => e.child(div().text_size(13).text_color(t.muted).whitespace_normal().line_height(1.5).child(n.description)))
+      .child(n.details ? div().text_size(13.5).line_height(1.55).child(TextView.markdown(`rv-arch-det-${this.ai?.generated}-${n.id}`, n.details))
+        : div().text_size(12.5).text_color(t.muted).whitespace_normal().child("No further details for this card in this analysis: Refresh diagrams (above) adds them for every card, Explain reads just this one."));
+  },
+  // What the card is: its file (path:line, a click opens it; how many changed places of this PR are in it) and its
+  // links to the other cards (a click shows that card).
+  archCardFacts(t, a, n, at) {
+    const path = at ? String(at).replace(/:\d+.*$/, "") : null;
+    const hs = path ? [...(this.fileHunks ?? new Map())].filter(([p]) => p === path || p.endsWith(`/${path}`) || path.endsWith(`/${p}`)).flatMap(([, h]) => h) : [];
+    const name = (id) => a.nodes.find((x) => x.id === id)?.label ?? id;
+    const links = (a.edges ?? []).map((e, i) => [e, i]).filter(([e]) => e.from === n.id || e.to === n.id);
+    const row = (label, kids) => h_flex().gap(8).items_start().text_size(12.5).child(div().flex_none().w(84).text_color(t.muted).child(label)).child(h_flex().flex_1().min_w(0).flex_wrap().gap(6).children(kids));
+    return v_flex().gap(6)
+      .child(row("File", at ? [div().id("rv-arch-card-file").text_color(t.accent).cursor_pointer().hover((s) => s.underline()).tooltip("Open this place in the code").on_click((_e, cx) => this.jumpTo(at, cx)).child(String(at)),
+        div().text_color(t.muted).child(hs.length ? `${hs.length} changed ${hs.length === 1 ? "place" : "places"} in this PR` : "not in this PR's diff")]
+        : [div().text_color(t.muted).child("The analysis names no file for this card (Ask names it)")]))
+      .when(links.length > 0, (e) => e.child(row("Connections", links.map(([x, i]) => {
+        const out = x.from === n.id, other = out ? x.to : x.from;
+        return div().id(`rv-arch-card-l${i}`).px(8).py(2).rounded(6).border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(`Show ${name(other)}`)
+          .on_click((_e, cx) => { this.archFocus = other; cx.notify(); }).child(`${out ? "→" : "←"} ${name(other)}${x.label ? `: ${x.label}` : ""}`);
+      }))));
+  },
+  // Wrap: only when clicked (by itself the page would jump whenever the room changes).
+  archWrapOn() { return this.archWrap === true; },
   // The picture shown: its layout with normal or narrow cards (Fit), memoized like stack.js archModel.
   archFitOn() {
     if (this.archFit !== undefined) return this.archFit;
@@ -2447,16 +2515,21 @@ export const ReviewMode = {
   },
   drillCacheKey(stack) { return drillKey(this.deepKey(), this.headNow?.() ?? this.head ?? "", stack); },
   drillResult(stack) { return this.deep.drills?.[this.drillCacheKey(stack)] ?? null; },
-  showDetails(item, from, cx, force = false) {
-    const stack = drillPush(this.drill?.from === from ? this.drill.stack : [], item);
-    this.drill = { from, stack };
-    if (force || !this.drillResult(stack)) this.runDrill(cx);
+  // Drill-downs per place (from: a layer, "arch:<card id>"), each with its own stack: several run at once, and each
+  // place shows its own when you come back to it. fresh: start at the item (a card's Explain), not one level deeper.
+  drillAt(from) { return (this.drills ??= new Map()).get(from) ?? null; },
+  setDrill(from, stack) { if (stack?.length) (this.drills ??= new Map()).set(from, { from, stack }); else this.drills?.delete(from); },
+  showDetails(item, from, cx, force = false, fresh = false) {
+    const stack = drillPush(fresh ? [] : this.drillAt(from)?.stack ?? [], item);
+    this.setDrill(from, stack);
+    if (force || !this.drillResult(stack)) this.runDrill(cx, from);
     cx.notify();
   },
-  runDrill(cx) {
-    const d = this.drill, ai = this.ai, key = this.deepKey();
-    if (!d || !ai || this.drillBusy) return;
-    const top = d.stack.at(-1), ck = this.drillCacheKey(d.stack), root = d.from === "arch" ? "Architecture" : plain(d.stack[0]?.label ?? "Layer");
+  runDrill(cx, from) {
+    const d = this.drillAt(from), ai = this.ai, key = this.deepKey(), busy = (this.drillsBusy ??= new Set()), errs = (this.drillErrs ??= new Map());
+    if (!d || !ai) return;
+    const top = d.stack.at(-1), ck = this.drillCacheKey(d.stack), root = d.from.startsWith("arch") ? "Architecture" : plain(d.stack[0]?.label ?? "Layer");
+    if (busy.has(ck)) return;
     const subject = { ...top, parent: d.stack.length > 1 ? d.stack.at(-2).label : null };
     const scope = top.kind === "node" ? scopeOf(ai, { node: top.id }) : top.kind === "layer" ? { kind: "layer", layer: { title: top.label, why: top.why, text: top.text, visuals: [], evidence: top.evidence } }
       : { kind: "node", node: { id: top.id, label: top.label, evidence: top.at ?? null }, edges: [] };
@@ -2464,12 +2537,12 @@ export const ReviewMode = {
     const req = { drill: { label: top.label, path: crumbs(d.stack, root).map((c) => c.label), subject }, model: model(), context: this.ctxReq(), root: this.lspRoot(), explore: Boolean(ai.explore),
       analysis: { title: ai.title, summary: ai.summary, layers: ai.steps.filter((x) => !x.pseudo).map((x) => ({ title: plain(x.title), why: plain(x.why) })) },
       picture: pictureOf(ai.arch), scope, hunks: hunksFor(files, this.exMode ? [] : this.hunks, top.hunks ?? []) };
-    this.drillBusy = ck; this.drillErr = null;
+    busy.add(ck); errs.delete(ck);
     cx.spawn(async (cx) => {
       const r = await exec("python3", [`${appHome()}/mods/pr-review/review.py`, JSON.stringify(req)], { timeout: 600000 }).catch((e) => ({ code: 1, stderr: String(e) }));
-      this.drillBusy = null;
+      busy.delete(ck);
       if (this.deepKey() !== key) return;
-      if (r.code !== 0) { this.drillErr = `Could not show details: ${(r.stderr || r.stdout).trim().slice(0, 200)}`; return cx.notify(); }
+      if (r.code !== 0) { errs.set(ck, `Could not show details: ${(r.stderr || r.stdout).trim().slice(0, 200)}`); return cx.notify(); }
       const out = JSON.parse(r.stdout);
       this.updateDeep(cx, (doc) => ({ ...doc, drills: cachePut(doc.drills, ck, { ...mapDrill(out.answer), cost: out.cost }) }));
       cx.notify();
@@ -2478,22 +2551,23 @@ export const ReviewMode = {
   // The sub-diagram under the picture (or the layer): breadcrumb (click a level to go back), the summary, the picture
   // with sample values, its cards to open further, Refresh and ✕.
   drillPanel(t, from) {
-    const d = this.drill;
-    if (!d || d.from !== from || !d.stack.length) return div();
-    const res = this.drillResult(d.stack), ck = this.drillCacheKey(d.stack), root = from === "arch" ? "Architecture" : "Layer", top = d.stack.at(-1);
+    const d = this.drillAt(from);
+    if (!d) return div();
+    const res = this.drillResult(d.stack), ck = this.drillCacheKey(d.stack), root = from.startsWith("arch") ? "Architecture" : "Layer", top = d.stack.at(-1);
+    const busy = this.drillsBusy?.has(ck), err = this.drillErrs?.get(ck);
     const crumb = (c, k) => div().id(`rv-crumb-${k}`).flex_none().text_size(12.5).text_color(c.depth === null ? t.muted : k === crumbs(d.stack, root).length - 1 ? t.foreground : t.accent)
-      .when(c.depth !== null && k < crumbs(d.stack, root).length - 1, (e) => e.cursor_pointer().tooltip("Go back to this level").on_click((_e, cx) => { this.drill = c.depth === 0 ? null : { from, stack: drillTo(d.stack, c.depth) }; cx.notify(); }))
+      .when(c.depth !== null && k < crumbs(d.stack, root).length - 1, (e) => e.cursor_pointer().tooltip("Go back to this level").on_click((_e, cx) => { this.setDrill(from, c.depth === 0 ? null : drillTo(d.stack, c.depth)); cx.notify(); }))
       .child(c.label);
     return v_flex().id(`rv-drill-${from}`).gap(8).p(12).rounded(10).border_1().border_color(t.border).bg(t.surface)
       .child(h_flex().flex_wrap().gap(6).items_center()
         .children(crumbs(d.stack, root).flatMap((c, k) => (k ? [div().text_color(t.dim).text_size(12).child("›"), crumb(c, k)] : [crumb(c, k)])))
         .child(div().flex_1())
-        .child(this.drillBusy === ck ? h_flex().gap(6).text_size(12).text_color(t.muted).child(div().child(SPIN[0]).frames(SPIN, 90)).child("Reading the code…")
-          : pill(`rv-drill-re-${from}`, t, "↻ Refresh", (_e, cx) => { this.runDrill(cx); cx.notify(); }).tooltip("Run the model call again for a fresh answer"))
-        .child(pill(`rv-drill-x-${from}`, t, "✕", (_e, cx) => { this.drill = null; cx.notify(); }).tooltip("Close the details").accessibility_label("Close details")))
-      .when(Boolean(this.drillErr), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(this.drillErr)))
-      .when(!res && this.drillBusy !== ck && !this.drillErr, (e) => e.child(div().text_size(12.5).text_color(t.muted).child(`One ${MODELS[model()].label} call opens up ${top.label}.`)))
-      .when(Boolean(res), (e) => e.child(div().text_size(13).line_height(1.5).whitespace_normal().child(res.summary))
+        .child(busy ? h_flex().gap(6).text_size(12).text_color(t.muted).child(div().child(SPIN[0]).frames(SPIN, 90)).child("Reading the code…")
+          : pill(`rv-drill-re-${from}`, t, "↻ Refresh", (_e, cx) => { this.runDrill(cx, from); cx.notify(); }).tooltip("Run the model call again for a fresh answer"))
+        .child(pill(`rv-drill-x-${from}`, t, "✕", (_e, cx) => { this.setDrill(from, null); cx.notify(); }).tooltip("Close the details").accessibility_label("Close details")))
+      .when(Boolean(err), (e) => e.child(div().text_size(12.5).text_color(t.ansi1).whitespace_normal().child(err)))
+      .when(!res && !busy && !err, (e) => e.child(div().text_size(12.5).text_color(t.muted).child(`One ${MODELS[model()].label} call opens up ${top.label}.`)))
+      .when(Boolean(res), (e) => e.child(div().text_size(13).line_height(1.5).child(TextView.markdown(`rv-drill-s-${from}-${d.stack.length}-${top.id}`, res.summary || "")))
         .child(visualCard(res.visual, t, `rv-drill-v-${from}`, (at, cx) => this.jumpTo(at, cx)))
         .when(res.visual.nodes.length > 0, (x) => x.child(h_flex().flex_wrap().gap(4).items_center().child(div().text_size(12).text_color(t.muted).child("Open further:"))
           .children(res.visual.nodes.map((n) => pill(`rv-drill-n-${from}-${n.id}`, t, n.label, (_e, cx) => this.showDetails({ id: `${top.id}/${n.id}`, label: n.label, at: n.at, kind: "sub", note: n.note }, from, cx)).tooltip("Show details of this part: one more model call"))))));
@@ -2532,7 +2606,7 @@ export const ReviewMode = {
       }));
     }
   },
-  leaveExplore() { if (this.exMode) { this.exMode = false; this.ai = this.prAiSaved ?? null; this.defFile = null; this.drill = null; } },
+  leaveExplore() { if (this.exMode) { this.exMode = false; this.ai = this.prAiSaved ?? null; this.defFile = null; this.drills = null; } },
   chooseExploreRepo(cx) {
     cx.spawn(async (cx) => { const dir = await pickFolder({ prompt: "Repository to explore" }); if (dir) { this.exRoot = await this.exploreRoot(dir); cx.notify(); } });
   },
@@ -2575,7 +2649,7 @@ export const ReviewMode = {
       const entry = (this.exIndex ?? []).find((x) => x.id === id) ?? {};
       this.exAi = exploreAi(JSON.parse(text));
       this.ex = { id, root: this.exAi.root, repo: this.exAi.repo, topic: this.exAi.topic, ctx: entry.ctx ?? null };
-      this.ai = this.exAi; this.page = "overview"; this.tab = "steps"; this.defFile = null; this.drill = null; this.archFocus = null;
+      this.ai = this.exAi; this.page = "overview"; this.tab = "steps"; this.defFile = null; this.drills = null; this.archFocus = null;
       this.applyExploreTrust();
       setShared("review.explore", { id, topic: this.ex.topic, repo: this.ex.repo, root: this.ex.root, at: Date.now() });
       cx.notify();

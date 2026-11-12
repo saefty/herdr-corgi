@@ -433,7 +433,8 @@ export default class Chatbar extends View {
           .child(div().flex_1().min_w(0).truncate().child(o.label))))))
       .when(Boolean(screen?.sent), (el) => el.child(div().px(10).pt(6).text_size(12.5).text_color(t.muted).truncate().child(`Sent ${screen.sent}`)))
       .child(h_flex().px(8).pt(8).gap(6).items_center()
-        .child(div().flex_1().min_w(0).child(Input.new(this.inputs[slot]).h(34).px(10).rounded(17)
+        // A press here must not reach the float: unstopped, it drags the box and the field never gets the cursor.
+        .child(div().id(`reply-${addr}`).flex_1().min_w(0).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.inputs[slot]).h(34).px(10).rounded(17)
           .border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground)))
         .child(this.mic(t, addr)))
       .child(h_flex().h(36).px(8).gap(6).items_center().justify_end()

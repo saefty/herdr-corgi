@@ -1,7 +1,7 @@
 // Run: node test_pr.mjs
 import assert from "node:assert/strict";
 import { diffRows, buildPrompt, nextChange, splitPatch, selection, lineLabel, anchorRow, buildReview, hunksOf, budget,
-  mapReview, suspectComment, fileRows, fileTree, reviewRequest, stepKey, lowValue, lineKey, rangeOf } from "./pr.js";
+  mapReview, suspectComment, fileRows, fileTree, reviewRequest, stepKey, lowValue, lineKey, rangeOf, codeOf, isStale } from "./pr.js";
 
 const rows = diffRows(["@@ -1,3 +1,3 @@", " a", "-b", "+B", " c", "@@ -10,2 +10,2 @@", " x", "+y"]);
 assert.deepEqual(rows[3], { kind: "+", number: 2, n: 2, text: "B" });
@@ -33,6 +33,18 @@ assert.equal(lineLabel(gone), "line 3 (old, removed)");
 assert.equal(anchorRow(r2, gone), 3);
 assert.equal(anchorRow(r2, sel), 5);
 assert.equal(anchorRow(r2, { end: 99, old: false }), -1);
+// STALE: a selection records its lines' text; the same lines changed after a push mark it, unknown ones never do.
+assert.equal(sel.code, "C\nD");
+assert.equal(gone.code, "c");
+assert.equal(codeOf(r2, { start: 19, end: 20, old: false }), undefined, "line 19 is not in the rows");
+const pushed = diffRows(["@@ -1,5 +1,5 @@", " a", " b", "-c", "+C", "+E", " e"]);
+const mine = { ...sel, head: "h1" };
+assert.equal(isStale(mine, "h2", codeOf(pushed, mine)), true, "line 4 reads E now");
+assert.equal(isStale(mine, "h2", codeOf(r2, mine)), false, "same lines after a push");
+assert.equal(isStale(mine, "h1", codeOf(pushed, mine)), false, "same head");
+assert.equal(isStale({ ...mine, head: null }, "h2", codeOf(pushed, mine)), true, "head unknown then: the text decides");
+assert.equal(isStale({ ...mine, code: undefined }, "h2", "x"), false, "an old comment without a record");
+assert.equal(isStale(mine, "h2", undefined), false, "its lines are not in the diff now");
 
 const review = buildReview({ pr: { number: 7, title: "Fix" }, comments: [{ file: "a.js", ...gone, hunk: "-c", text: "Why removed?" }, { file: "b.js", text: " Name? " }] });
 assert.equal(review, "PR #7 \"Fix\": code review with 2 points. Work through the points one by one: answer questions, make the requested changes. At the end, say briefly per point what you did." +
@@ -84,12 +96,25 @@ assert.deepEqual([lg.hunks, lg.questions.length, lg.why, lg.text, lg.order, lg.f
 assert.deepEqual(rv.suspects.map((s) => [s.line, s.old, s.approx, s.severity, s.reason]), [[11, true, false, "low", "gone"], [11, false, false, "high", "boom"], [11, true, true, "medium", "far"]]);
 assert.deepEqual(rv.asks.map((a) => [a.coverage, a.hunks]), [["extra", [rh[1].id]], ["absent", []]]);
 assert.equal(stepKey(lg), stepKey({ hunks: [rh[0].id], title: "renamed later" }));
+// Architecture-review findings stay in their layer, in the reviewer findings' shape, with an id from category, file and title.
+{
+  const fs = [{ file: "./a.js", line: 11, severity: "high", category: "scope", title: "Unrelated rename", detail: "d", suggestion: "s" },
+    { file: "a.js", line: 3, severity: "??", category: "scope", title: "Unrelated rename" }, { file: "", title: "no file" }, { file: "b.js", line: "7", end: 9, title: "Leaky boundary" }];
+  const one = mapReview({ steps: [{ title: "logic", hunks: ["h1"], findings: fs }, { title: "tests", hunks: ["h2"] }] }, rh);
+  const [st] = one.steps, k = stepKey(st);
+  assert.deepEqual(st.findings.map((f) => [f.file, f.line, f.end, f.severity, f.category, f.reviewer, f.step]),
+    [["a.js", 11, 11, "high", "scope", "analysis", k], ["b.js", 7, 9, "medium", "structure", "analysis", k]]);
+  assert.equal(st.findings[0].suggestion, "s"); assert.deepEqual(one.steps[1].findings, []);
+  const again = mapReview({ steps: [{ title: "renamed", hunks: ["h2"], findings: [{ file: "a.js", line: 40, category: "scope", title: "Unrelated rename" }] }] }, rh);
+  assert.equal(again.steps[0].findings[0].id, st.findings[0].id); // other hunks after a push, same category, file and title: the same finding (its status stays)
+  assert.notEqual(st.findings[0].id, st.findings[1].id);
+}
 // Stale hunk (no lines today): its suspects go, its step keeps the id so the UI can say "veraltet".
 assert.deepEqual(mapReview({ steps: [{ title: "s", hunks: ["h1"] }], suspects: [{ hunk: "h1", line: 1, reason: "r" }] }, [{ alias: "h1", id: "gone" }]).suspects, []);
 
 // Suggestion -> pending comment: the same anchor a click on that line gives.
 const rows1 = diffRows(rh[0].lines), sc = suspectComment(rv.suspects[1], rows1, "id1");
-assert.deepEqual({ ...sc, hunk: undefined }, { id: "id1", file: "a.js", start: 11, end: 11, old: false, hunk: undefined, text: "boom", from: "ki" });
+assert.deepEqual({ ...sc, hunk: undefined }, { id: "id1", file: "a.js", start: 11, end: 11, old: false, hunk: undefined, code: "new", text: "boom", from: "ki" });
 assert.equal(sc.hunk, selection(rows1, rows1.findIndex((r) => r.kind === "+")).hunk);
 assert.equal(suspectComment({ ...rv.suspects[1], line: 500 }, rows1, "x"), null);
 
@@ -126,6 +151,19 @@ const was = MODELS0.haiku.chars; MODELS0.haiku.chars = 100;
 const capped = reviewRequest({ url: "u", files: rq, model: "haiku", context: { id: "default", env: null }, dir: "/d" });
 MODELS0.haiku.chars = was;
 assert.deepEqual([capped.req.hunks.map((h) => h.alias), capped.req.cut], [["h2", "h3"], ["h1"]]);
+// A model from the CLI's list: its class sets the budget, and its id is safe in a file name.
+const { tierOf } = await import("./pr.js");
+assert.deepEqual(["haiku", "claude-haiku-4-5-20251001", "sonnet", "claude-sonnet-5", "opus", "fable", "claude-fable-5-1[1m]", undefined].map(tierOf),
+  ["haiku", "haiku", "sonnet", "sonnet", "opus", "opus", "opus", "opus"]);
+MODELS0.haiku.chars = 100;
+const byId = reviewRequest({ url: "u", files: rq, model: "claude-haiku-4-5[1m]", context: { id: "default", env: null }, dir: "/d" });
+MODELS0.haiku.chars = was;
+assert.deepEqual(byId.req.cut, ["h1"], "a haiku id gets haiku's budget");
+assert.ok(byId.out.endsWith("-claude-haiku-4-5_1m_.json") && byId.req.model === "claude-haiku-4-5[1m]", byId.out);
+// Prices by the longest id prefix; an unknown model costs its class's price.
+const { priceOf } = await import("./pr.js");
+assert.deepEqual([priceOf("claude-opus-5-5"), priceOf("claude-opus-5"), priceOf("claude-fable-5-2"), priceOf("claude-fable-5-1"), priceOf("claude-sonnet-5-5"), priceOf("claude-haiku-5-5"), priceOf("claude-haiku-4-5-20251001"), priceOf("sonnet")],
+  [[4, 20], [5, 25], [8, 40], [10, 50], [2, 10], [0.1, 0.5], [1, 5], [3, 15]]);
 
 // Range selection by line keys: survives new row arrays, works either way round and across hunks of a file;
 // expanded context in between is part of it, a hidden gap is left out of the quoted code.

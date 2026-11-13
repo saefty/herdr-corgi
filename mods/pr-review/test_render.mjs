@@ -1,6 +1,6 @@
 // Run: node test_render.mjs  (the review view rendered against stand-ins for gpui-kit, gpui-base and herdr: the first
 // render, the Files list's layout and scrolling (autoFold), 0 / 3 / 310 files, the Architecture page with the Ask drawer
-// open, folded and squeezing. An exception, a null or non-finite number given to an element, a bad virtual-list size
+// open, folded and squeezing, a layer's findings and the Findings tab. An exception, a null or non-finite number given to an element, a bad virtual-list size
 // or key fails it; a ReferenceError here once showed in Herdr as "This view could not be re-rendered — Null".)
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
@@ -53,8 +53,9 @@ registerHooks({
 });
 
 const { default: PrReview } = await import("./main.js");
-const { splitPatch, hunksOf, diffRows } = await import("./pr.js");
+const { splitPatch, hunksOf, diffRows, stepKey } = await import("./pr.js");
 const { foldOnOpen } = await import("./views.js");
+const { renderMini } = await import("./review.js");
 const cx = { notify() {}, timer: { after() {}, every() {} }, spawn() {}, focus_handle: () => ({ focus() {}, is_focused: () => false }), stop_propagation() {}, new() {} };
 
 function review(files) {
@@ -92,7 +93,54 @@ for (const n of [0, 3, 310]) {
     v.deep.drawer[v.deepKey()] = drawer; v.winW = winW;
     ok(`${n} files: Architecture page, drawer ${drawer} at ${winW} px`, () => v.render(cx));
   }
+  // A clicked card with its layer opened: the layer's explanation, questions and picture in the card.
+  v.ai.arch.nodes[0].at = "src/a.ts:3";
+  const lf = { id: "a1", reviewer: "analysis", step: "k", file: "src/f0.ts", line: 2, end: 2, severity: "high", category: "scope", title: "Unrelated", detail: "d", suggestion: "s" };
+  v.ai = { ...v.ai, steps: [...v.ai.steps, { title: "b", why: "w", text: "x", hunks: [], questions: ["q?"], risk: "high", evidence: ["src/a.ts:1"], findings: [lf], // a new analysis, as the view gets one
+    visuals: [{ kind: "flow", title: "f", nodes: [{ id: "n1", label: "N1", at: "src/a.ts:3" }, { id: "n2", label: "N2" }], edges: [{ from: "n1", to: "n2", label: "y" }] }] }] };
+  v.archFocus = "a"; v.cardLayersOpen = null; // the first (riskiest) layer starts open
+  ok(`${n} files: Architecture page, a card with its layer analysis open below the details`, () => v.render(cx));
+  assert.deepEqual(v.cardLayers.list, [v.ai.steps[1]]);
+  v.cardLayersOpen = new Map([[`a|${stepKey(v.ai.steps[1])}`, false]]);
+  ok(`${n} files: Architecture page, the layer closed (its highlight still shows)`, () => v.render(cx));
+  v.archFocus = null; v.page = null; v.cur = 1;
+  ok(`${n} files: the same layer open in the Layers view`, () => v.render(cx));
+  // Its analysis finding: in the layer above, and in the Findings tab (read live from the analysis, linked to its layer).
+  assert.deepEqual(v.findings().map((f) => f.id), ["a1"]); assert.equal(v.layerOf(lf), 1);
+  v.tab = "findings"; v.ffilter = { reviewer: "analysis", severity: "all", status: "open" };
+  ok(`${n} files: the Findings tab with an analysis finding`, () => v.render(cx));
+  v.ai = { ...v.ai, steps: v.ai.steps.map((s) => ({ ...s, findings: [] })) };
+  assert.deepEqual(v.findings(), [], "a finding the newest analysis no longer has is gone");
   v.tab = "files"; v.page = null; v.deep.drawer[v.deepKey()] = "open";
   ok(`${n} files: back to the list with the drawer open`, () => { v.render(cx); layout(0.5); v.autoFold(cx); });
 }
+// The Comments tab and the diff with GitHub's resolved and outdated threads, a bot's old and new comments, and a
+// stale comment of yours (its line read "y" when written, "x" now).
+{
+  const { withThreadState } = await import("./threads.js");
+  const v = review(3), g = (id, user, extra) => ({ id, path: "src/f0.ts", line: id, side: "RIGHT", user, user_type: user.endsWith("[bot]") ? "Bot" : "User", at: `2024-01-0${id}`, commit_id: "c1", body: `b${id}`, ...extra });
+  v.gh = withThreadState([g(1, "anna"), g(2, "anna", { in_reply_to_id: 1 }), g(3, "lint[bot]"), g(4, "lint[bot]", { commit_id: "c2" }), g(5, "bob", { line: null, original_line: 9, outdated: true })],
+    [{ id: 1, resolved: true, outdated: false }]);
+  v.head = "new";
+  v.comments = [{ id: "s1", file: "src/f0.ts", start: 1, end: 1, old: false, text: "stale", code: "y", head: "old" }, { id: "s2", file: "src/f0.ts", start: 2, end: 2, old: false, text: "fresh", code: "x", head: "old" }];
+  assert.deepEqual([...v.staleNow()], ["s1"]);
+  assert.deepEqual([v.ghNow().resolved, v.ghNow().botsHidden, v.ghNow().list.map((x) => x.id)], [1, 1, [4, 5]], "resolved hidden, the bot's older commit hidden");
+  v.tab = "comments"; v.page = null;
+  ok("Comments tab: resolved, bots, outdated, stale", () => v.render(cx));
+  assert.ok(v.commentRowsNow().find((r) => r.id === "s1").stale && v.commentRowsNow().find((r) => r.id === "gh5").outdated);
+  v.showResolved = true; v.allBots = true;
+  ok("Comments tab: resolved and all bot comments shown", () => v.render(cx));
+  assert.ok(v.commentRowsNow().find((r) => r.id === "gh1").resolved);
+  v.tab = "files";
+  ok("Files: the cards with STALE, Resolved and an outdated comment at the file's end", () => { v.render(cx); layout(0); });
+  const items = v.filesItems().items;
+  assert.ok(items.some((it) => it.t === "gh" && it.loose && it.g.id === 5), "the outdated comment shows loose");
+  assert.ok(items.some((it) => it.t === "gh" && !it.loose && it.g.id === 1), "a resolved thread under its line once shown");
+}
+// The minimized review: nothing without one, an entry with Open and ✕ with one.
+globalThis.__rv.store.set("review.minimized", null);
+renderMini();
+globalThis.__rv.store.set("review.minimized", { target: { url: "https://github.com/o/r/pull/7", number: 7, title: "feat: x", repo: "o/r" }, at: 1 });
+renderMini();
+globalThis.__rv.store.set("review.minimized", null);
 console.log("render ok");

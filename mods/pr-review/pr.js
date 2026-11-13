@@ -60,9 +60,21 @@ export function selection(rows, a, b = a, ctx = 3, max = 60) {
   while (start > 0 && !edge(rows[start]) && lo - start < ctx) start--;
   while (end + 1 < rows.length && !edge(rows[end + 1]) && end - hi < ctx) end++;
   end = Math.min(end, start + max - 1);
-  const prefix = { "+": "+", "-": "-", " ": " ", "@": "" };
-  return { start: nums[0], end: nums[nums.length - 1], old, hunk: rows.slice(start, end + 1).filter((r) => r.kind !== "gap").map((r) => (prefix[r.kind] ?? "") + r.text).join("\n") };
+  const prefix = { "+": "+", "-": "-", " ": " ", "@": "" }, at = { start: nums[0], end: nums[nums.length - 1], old };
+  // code: the selected lines' text, so a later push that changes them marks the comment STALE (isStale).
+  return { ...at, hunk: rows.slice(start, end + 1).filter((r) => r.kind !== "gap").map((r) => (prefix[r.kind] ?? "") + r.text).join("\n"), code: codeOf(rows.slice(lo, hi + 1), at) };
 }
+
+// The text of lines start..end on a comment's side; undefined unless every one of them is in the rows (a gap, or a
+// line gone from the diff: unknown, never a false STALE).
+export function codeOf(rows, { start, end, old }) {
+  if (start === undefined || end === undefined) return undefined;
+  const lines = rows.filter((r) => r.number >= start && r.number <= end && (old ? r.kind === "-" : r.kind === "+" || r.kind === " "));
+  return lines.length === end - start + 1 ? lines.map((r) => r.text).join("\n") : undefined;
+}
+// A local comment or note whose lines changed since it was written: it recorded their text (code), the head moved
+// (or one of the heads is unknown), and the same lines read otherwise now. Nothing recorded, or unknown now: not stale.
+export const isStale = (a, head, now) => a?.code != null && !(a.head && head && a.head === head) && now !== undefined && now.trim() !== String(a.code).trim();
 
 // The first row of the next (dir 1) or previous (-1) block of changed lines from row i; -1 when none.
 export function nextChange(rows, i, dir) {
@@ -173,8 +185,21 @@ export function budget(hunks, max = 60000) {
 
 // ---- the review layout (review.js)
 
-// Models for the AI review: the claude CLI's alias, its label, how many diff characters it is sent.
+// The budget classes of the AI review's models: a label (until the CLI's list names the model) and how many diff
+// characters a run is sent. The models themselves come from the claude CLI (models.py); tierOf files each one here.
 export const MODELS = { haiku: { label: "Haiku", chars: 60000 }, sonnet: { label: "Sonnet", chars: 150000 }, opus: { label: "Opus", chars: 150000 } };
+// A model's class, as llm.tier: haiku, sonnet, or opus (the bigger ones, and any model not named).
+export const tierOf = (m) => (/haiku/i.test(m ?? "") ? "haiku" : /sonnet/i.test(m ?? "") ? "sonnet" : "opus");
+// Dollars per million input and output tokens, by the longest prefix of the resolved model id. Neither CLI reports
+// prices, so these are Anthropic's list prices (November 2026); a model not listed costs its class's price.
+// ponytail: a hand-kept table; update it when Anthropic's prices change.
+const PRICES = { "claude-fable-5-2": [8, 40], "claude-fable-5": [10, 50], "claude-opus-5-5": [4, 20], "claude-opus-5": [5, 25], "claude-opus-4": [5, 25],
+  "claude-sonnet-5": [2, 10], "claude-haiku-5": [0.1, 0.5] };
+const CLASS_PRICE = { haiku: [1, 5], sonnet: [3, 15], opus: [5, 25] };
+export const priceOf = (resolved) => {
+  const id = String(resolved ?? ""), k = Object.keys(PRICES).filter((p) => id.startsWith(p)).sort((a, b) => b.length - a.length)[0];
+  return k ? PRICES[k] : CLASS_PRICE[tierOf(id)];
+};
 
 // Lockfiles, snapshots, minified and generated code: sent last, so they are what a size cap cuts first.
 export const lowValue = (path) => /(^|\/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|go\.sum)$|\.snap$|\.min\.(js|css)$|(^|\/)(dist|vendor|generated|__generated__)\//.test(path);
@@ -185,11 +210,12 @@ export const lowValue = (path) => /(^|\/)([^/]*\.lock|package-lock\.json|pnpm-lo
 // hunks: hunksOf(files) when the caller has it already (a big diff takes too long to hash twice in one slice).
 export function reviewRequest({ url, pr = url, worktree = null, files, hunks: made = null, model, context, dir }) {
   const hunks = made ?? hunksOf(files);
-  const { sent, cut } = budget([...hunks.filter((h) => !lowValue(h.path)), ...hunks.filter((h) => lowValue(h.path))], MODELS[model].chars);
+  const { sent, cut } = budget([...hunks.filter((h) => !lowValue(h.path)), ...hunks.filter((h) => lowValue(h.path))], MODELS[tierOf(model)].chars);
   const at = new Map(hunks.map((h, i) => [h.alias, i]));
   sent.sort((a, b) => at.get(a.alias) - at.get(b.alias));
   cut.sort((a, b) => at.get(a) - at.get(b));
-  const base = `${dir}/rv-${hash(url)}`, out = `${base}-${hash(hunks.map((h) => h.id).sort().join(","))}-${model}.json`, latest = `${base}-${model}.json`;
+  const m = String(model).replace(/[^\w.-]/g, "_"); // a model id in a file name
+  const base = `${dir}/rv-${hash(url)}`, out = `${base}-${hash(hunks.map((h) => h.id).sort().join(","))}-${m}.json`, latest = `${base}-${m}.json`;
   return { hunks, out, latest, status: `${out}.status`,
     req: { out, latest, status: `${out}.status`, model, context, pr, source: url, worktree, hunks: sent.map(({ alias, id, path, lines }) => ({ alias, id, path, lines })), cut } };
 }
@@ -220,7 +246,8 @@ export const visualsOf = (x) => (Array.isArray(x?.visuals) ? x.visuals : x?.visu
 export const atLine = (r, n, old) => r.number === n && (old ? r.kind === "-" : r.kind === "+" || r.kind === " ");
 
 // The model's analysis with aliases turned into hunk ids (unknown ones dropped): steps in risk order (then reading
-// order), each with its explanation, questions (at most 3), flows (at most 3; traces at most 12 lines); every
+// order), each with its explanation, questions (at most 3), flows (at most 3; traces at most 12 lines), its own
+// findings (layerFindings); every
 // suggested line put on a row of its hunk (the hunk's first change when the model named a line it doesn't have: approx).
 export function mapReview(answer, hunks) {
   const byAlias = new Map(hunks.map((h) => [h.alias, h]));
@@ -232,7 +259,7 @@ export function mapReview(answer, hunks) {
       questions: (s.check_questions ?? s.questions ?? []).filter(Boolean).slice(0, 3), hunks: ids(s.hunks), n,
       flows: (s.flows ?? []).slice(0, 3).map((f) => ({ function: f.function ?? "", at: f.at ?? "", inputs: f.inputs ?? [], output: f.output ?? null,
         side_effects: f.side_effects ?? [], calls: f.calls ?? [], trace: (f.trace ?? []).slice(0, 12) })) };
-  }).sort((a, b) => RISKS.indexOf(a.risk) - RISKS.indexOf(b.risk) || a.order - b.order || a.n - b.n);
+  }).map((st) => ({ ...st, findings: layerFindings(answer.steps[st.n].findings, stepKey(st)) })).sort((a, b) => RISKS.indexOf(a.risk) - RISKS.indexOf(b.risk) || a.order - b.order || a.n - b.n);
   const suspects = [];
   const lines = [...(answer.suspects ?? []).map((s) => ({ ...s, text: s.reason })), ...(answer.steps ?? []).flatMap((s) => s.suggestions ?? [])];
   for (const s of lines) {
@@ -256,6 +283,21 @@ export function mapReview(answer, hunks) {
     arch: answer.architecture?.nodes?.length ? answer.architecture : null, visuals: visualsOf(answer), blast: answer.blast_radius?.units?.length ? answer.blast_radius : null,
     asks: (answer.asks ?? []).map((a) => ({ text: a.text ?? "", coverage: ["seen", "partly", "absent", "extra"].includes(a.coverage) ? a.coverage : "absent", hunks: ids(a.hunks),
       elements: (a.elements ?? []).map(String) })) };
+}
+
+const CATEGORIES = ["structure", "security", "data", "scope", "requirement", "bug"];
+// A layer's architecture-review findings in the reviewer findings' shape (reviewers.py normalize). They stay in their
+// layer: the id comes from the layer's key, file and title, so a status survives when a new analysis finds the same.
+function layerFindings(list, step) {
+  return (list ?? []).map((f) => ({ f, file: String(f.file ?? "").trim().replace(/^\.\//, ""), line: Number(f.line) || 0, title: String(f.title ?? "").trim() }))
+    .filter((x) => x.file && x.title)
+    // The id is what the finding is about (category, file, title), not its layer's hunks: those change with every push,
+    // and a finding the next analysis reports again keeps its status (Fix sent, Dismissed). `step` links it to its layer.
+    .map(({ f, file, line, title }) => ({ f, file, line, title, category: CATEGORIES.includes(f.category) ? f.category : "structure" }))
+    .map(({ f, file, line, title, category }) => ({ id: `a${hash(`${category}|${file}|${title}`)}`, reviewer: "analysis", step, file, line, end: Number(f.end) || line,
+      severity: ["high", "medium", "low"].includes(f.severity) ? f.severity : "medium", category,
+      title, detail: String(f.detail ?? ""), suggestion: String(f.suggestion ?? "") }))
+    .filter((x, i, all) => all.findIndex((y) => y.id === x.id) === i); // the same title twice in a file: one finding
 }
 
 // A suspicious line taken over as a pending review comment (rows: its hunk's or file's rows); null when not shown there.

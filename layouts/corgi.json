@@ -185,6 +185,17 @@
                   },
                   "edge": "bottom",
                   "align": "end"
+                },
+                {
+                  "id": "review-mini",
+                  "content": {
+                    "mod": "pr-review",
+                    "props": {
+                      "part": "mini"
+                    }
+                  },
+                  "edge": "top",
+                  "align": "center"
                 }
               ]
             },

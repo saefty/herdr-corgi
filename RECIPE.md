@@ -101,7 +101,8 @@ root (row)
     draws nothing). A Claude Code hook (`python3 hook.py`, added only on Set up) records each session per terminal;
     after a restart it posts a `notify()` that opens the resume dialog. Resuming types into the terminal (`hc send`).
   - `corgi`: the floating update notice. Runs `python3 <clone>/corgi.py status --json` once a day and posts a
-    `notify()` whose action is `mod.open {"name": "corgi"}`.
+    `notify()` whose action is `mod.open {"name": "corgi"}`. Its popup also lists the rows other mods publish as
+    `corgi.items.<provider>` (title, subtitle, a `›`; a click runs the row's commands and closes the popup).
 - The mods talk only through shared state (`goto.*`, `chatbar.*`, `dictate.*`, `review.*`, `timetrack.*`), as
   CONVENTIONS.md describes. Any one can be removed and the others keep working.
 - **Keys** (`keys.json` at the repo root): `global` `cmd-shift-p` `mod.open:goto`, `cmd-alt-shift-p`

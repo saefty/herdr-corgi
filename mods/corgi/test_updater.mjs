@@ -1,7 +1,7 @@
 // node --test mods/corgi/test_updater.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DAY, due, readStatus, summary, decide, shortDate } from "./updater.js";
+import { DAY, due, readStatus, summary, decide, shortDate, entries } from "./updater.js";
 
 const status = (mods, updates, pending = []) => ({ code: 0, stdout: JSON.stringify({ mods, updates, pending, unmanaged: [] }), stderr: "" });
 const mod = (o) => ({ version: "1.0.0", dev: null, installed: true, changed: [], latest: "1.0.0", update: false, changelog: "", error: null, ...o });
@@ -68,4 +68,19 @@ test("pending releases never notify; they do once they become updates", () => {
   assert.deepEqual(decide(pendingOnly, null), { title: null, notified: null });
   const eligible = { updates: [{ name: "goto", to: "1.3.0" }], pending: [], errors: [], error: null };
   assert.equal(decide(eligible, null).title, "Update: goto 1.3.0");
+});
+
+test("lists the rows other mods publish, and skips what is malformed", () => {
+  const state = {
+    "corgi.items.resume": [{ id: "hooks", title: "Resume Claude sessions", subtitle: "Claude Code hooks not set up", run: [["mod.open", { name: "resume" }]] }],
+    "corgi.items.other": [{ title: "No id", run: [["x.y"]] }, { title: "no run" }, { title: "empty run", run: [] }, { run: [["x.y"]] }, { title: "bad run", run: ["x.y"] }, null],
+    "corgi.items.broken": "not a list",
+  };
+  const rows = entries(["resume", "other", "broken", "gone"], (k) => state[k]);
+  assert.deepEqual(rows, [
+    { key: "resume-hooks", title: "Resume Claude sessions", subtitle: "Claude Code hooks not set up", run: [["mod.open", { name: "resume" }]] },
+    { key: "other-No id", title: "No id", subtitle: "", run: [["x.y"]] },
+  ]);
+  assert.deepEqual(entries(undefined, () => null), []);
+  assert.deepEqual(entries("resume", () => null), []);
 });

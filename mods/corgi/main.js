@@ -8,10 +8,12 @@
 // A release waits min_release_age_days (config.json) before it counts as an update; until then the popup lists it as
 // pending and nothing notifies. The popup's settings row changes that wait and the early-updates opt-in through
 // `corgi.py config set`.
+// Above it the popup lists what other mods publish as `corgi.items.<provider>` (their settings or setup): a click
+// runs the row's commands. Corgi knows none of those mods; with no provider there is no such section.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, notify, props, closeOverlay, run, shared, setShared, theme } from "herdr";
-import { HOUR, due, readStatus, decide, shortDate } from "./updater.js";
+import { HOUR, due, readStatus, decide, shortDate, entries } from "./updater.js";
 
 const LOGO = "mods/corgi/logo.png"; // paths are relative to the Herdr home
 
@@ -126,6 +128,14 @@ export default class Corgi extends View {
             else { this.confirmEarly = true; cx.notify(); }
           }).tooltip("Toggle offering releases before the waiting period ends."))];
 
+    const mods = entries(shared("corgi.providers"), shared).map((m) => h_flex().id(`mod-${m.key}`).gap(8).px(8).py(5)
+      .rounded(5).items_center().cursor_pointer().hover((st) => st.bg(t.hover)).tooltip("Open this mod's settings.")
+      .on_click(() => { for (const [name, args] of m.run) run(name, args ?? {}); closeOverlay(this.overlay); })
+      .child(v_flex().flex_1().min_w(0)
+        .child(div().text_size(12).text_color(t.foreground).truncate().child(m.title))
+        .when(!!m.subtitle, (el) => el.child(div().text_size(11).text_color(t.dim).truncate().child(m.subtitle))))
+      .child(div().text_size(12).text_color(t.dim).child("›")));
+
     return v_flex().id("root").size_full().bg(t.popover).p(14).gap(10).text_color(t.foreground)
       .child(h_flex().justify_between().items_center()
         .child(h_flex().gap(8).items_center().child(image(LOGO).size(22))
@@ -135,6 +145,7 @@ export default class Corgi extends View {
         .child(div().id("checked-at").tooltip("When updates were last checked.").text_size(11).text_color(t.dim).child(s.checked ? `Checked ${clock(s.checked)}` : "")))
       .child(v_flex().id("list").flex_1().gap(12).overflow_y_scrollbar().children(body)
         .children((s.errors ?? []).map((e) => line(t.dim, `${e.name}: ${e.error}`))))
+      .children(mods.length ? [v_flex().gap(2).pt(8).border_t_1().border_color(t.border).children(mods)] : [])
       .children(settings)
       .child(h_flex().gap(8).justify_end()
         .child(button("again", "Check now", false, (_e, cx) => this.check(cx, false)).tooltip("Look for mod updates now."))

@@ -104,7 +104,8 @@ release and saves yours as a patch. `./corgi.py diff <mod>` shows what you chang
 out. Click it for the changelog and an Update button that runs `corgi.py update` in a new tab, so you see every step.
 The popup also lists releases still in their waiting period ("goto 1.3.0 available on Nov 13"), and has the wait in
 days and the early-updates switch (it shows the warning and asks for a second click). Waiting releases never
-notify; they do once they become available.
+notify; they do once they become available. Mods can add a row of their own to the popup, for their settings or
+setup: resume's row opens its dialog, where its Claude Code hooks are set up or removed.
 It needs a floating block in each layout you use (`~/.config/herdr-app/layouts/<name>.json`, on the root node); the
 block draws nothing:
 

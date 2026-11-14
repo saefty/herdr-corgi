@@ -1,5 +1,6 @@
 // The updater's pure parts: when to check (due), what `corgi.py status --json` said (readStatus), and whether
-// that is worth a notification (decide). No host calls here, so test_updater.mjs runs it under plain node.
+// that is worth a notification (decide), and which rows other mods put in the popup (entries). No host calls here,
+// so test_updater.mjs runs it under plain node.
 
 export const HOUR = 60 * 60 * 1000;
 export const DAY = 24 * HOUR;
@@ -38,6 +39,19 @@ export function decide(result, notified) {
   if (!result.updates.length) return { title: null, notified: result.error || result.errors.length ? notified : null };
   const key = result.updates.map((u) => `${u.name}@${u.to}`).sort().join(",");
   return { title: key === notified ? null : summary(result.updates), notified: key };
+}
+
+// The rows other mods put in the popup (CONVENTIONS.md, "Provide data to a hub"): `corgi.providers` names the
+// providers and each writes `corgi.items.<provider>` = [{id, title, subtitle, run: [[command, args], ...]}].
+// `read` is `shared`. A malformed list or row is skipped: one mod's mistake never breaks the popup.
+export function entries(providers, read) {
+  return (Array.isArray(providers) ? providers : []).flatMap((p) => {
+    const items = read(`corgi.items.${p}`);
+    return (Array.isArray(items) ? items : [])
+      .filter((i) => typeof i?.title === "string" && Array.isArray(i.run) && i.run.length > 0
+        && i.run.every((r) => Array.isArray(r) && typeof r[0] === "string"))
+      .map((i) => ({ key: `${p}-${i.id ?? i.title}`, title: i.title, subtitle: typeof i.subtitle === "string" ? i.subtitle : "", run: i.run }));
+  });
 }
 
 // "2026-11-13" -> "Nov 13" (local date, no time zone shift)

@@ -79,7 +79,10 @@ setShared("goto.items.mymod", [{ id: "a1", title: "Reply to t9", run: [["pane.fo
 ```
 
 - Register the provider name once in `<hub>.providers`, then write your own key. Never edit another provider's key.
-- The kinds in use: `goto.items`, `goto.handlers`, `goto.repos`, `chatbar.agents`.
+- The kinds in use: `goto.items`, `goto.handlers`, `goto.repos`, `chatbar.agents`, `corgi.items`.
+- `corgi.items.<provider>` is a mod's row in Corgi's popup, for its settings or setup:
+  `[{ id, title, subtitle, run: [[command, args], ...] }]`. A click runs `run` and closes the popup. resume
+  publishes one that opens its dialog, with the state of its Claude Code hooks as the subtitle.
 - How a hub combines providers is in its PROVIDERS.md. The chat bar, for example, merges them in the order they
   registered: a later provider wins per field, and `null` or a missing field is skipped.
 
